@@ -1,2 +1,208 @@
 # Personal-AI-Second-Brain
-A local-first personal AI knowledge assistant built with LLM, RAG and vector database.
+# 🧠 Personal AI Second Brain
+
+A local-first personal AI knowledge assistant built with Large Language Models (LLMs), Retrieval-Augmented Generation (RAG), and vector databases.
+
+## 📌 Overview
+
+Personal AI Second Brain is a project that aims to build a private AI-powered knowledge management system.
+
+Instead of manually searching through documents, this system allows users to upload personal files, retrieve information through semantic search, and interact with their own knowledge base.
+
+The goal is to create a personal AI assistant that can understand and organize:
+
+- 📚 Learning materials
+- 📝 Notes
+- 💻 Programming documents
+- 🚀 Project files
+- 📄 Research papers
+
+---
+
+# 🎯 Goals
+
+The project focuses on building a practical personal knowledge system with:
+
+- Local AI inference
+- Private knowledge storage
+- Semantic document retrieval
+- RAG-based question answering
+- Personal knowledge organization
+
+The final goal is to create an AI assistant that can help users:
+
+- Find information from their own files
+- Summarize knowledge
+- Connect related concepts
+- Support learning and projects
+
+---
+
+# 🏗️ Architecture
+
+The system follows a Retrieval-Augmented Generation (RAG) architecture.
+Documents
+|
+v
+Document Parser
+|
+v
+Text Chunking
+|
+v
+Embedding Model
+|
+v
+Vector Database
+|
+v
+Semantic Retrieval
+|
+v
+Large Language Model
+|
+v
+Answer + Sources
+
+---
+
+# 🛠️ Technology Stack
+
+## AI
+
+- Ollama
+- Qwen Series Models
+
+## Backend
+
+- Python
+- FastAPI
+
+## Knowledge Retrieval
+
+- Embedding Models
+- ChromaDB
+
+## Frontend
+
+- HTML
+- CSS
+- JavaScript
+
+## Development
+
+- GitHub
+- VS Code
+
+---
+
+# 💻 Hardware Environment
+
+Current development environment:
+
+| Component | Specification |
+|-|-|
+| CPU | Intel Core Ultra 7 155H |
+| RAM | 32GB |
+| OS | Windows |
+
+The project is designed to run efficiently on consumer hardware.
+
+---
+
+# 🚀 Development Roadmap
+
+## Phase 0: Environment Setup
+
+- [x] Create GitHub repository
+- [x] Install Ollama
+- [ ] Test local LLM inference
+- [ ] Select suitable local model
+
+---
+
+## Phase 1: Local AI Engine
+
+- [ ] Connect Python with Ollama API
+- [ ] Build basic AI interaction interface
+
+---
+
+## Phase 2: Document Processing
+
+- [ ] Support PDF/TXT/Markdown files
+- [ ] Extract document contents
+- [ ] Implement text chunking
+
+---
+
+## Phase 3: Knowledge Retrieval
+
+- [ ] Generate embeddings
+- [ ] Store vectors
+- [ ] Implement semantic search
+
+---
+
+## Phase 4: RAG System
+
+- [ ] Retrieve relevant knowledge
+- [ ] Generate answers based on documents
+- [ ] Provide source references
+
+---
+
+## Phase 5: Web Application
+
+- [ ] Build user interface
+- [ ] Upload documents
+- [ ] Chat with knowledge base
+
+---
+
+## Phase 6: Personal Memory System
+
+Future features:
+
+- Knowledge organization
+- Learning history
+- Project memory
+- Knowledge graph
+- AI-assisted planning
+
+---
+
+# 📂 Project Structure
+AI-Second-Brain/
+
+├── app/
+│
+├── data/
+│
+├── tests/
+│
+├── docs/
+│
+├── README.md
+│
+└── requirements.txt
+
+---
+
+# 🌱 Vision
+
+The project aims to explore how local AI models can become a personal knowledge companion.
+
+By combining:
+
+- Local Large Language Models
+- Retrieval-Augmented Generation
+- Personal Data Management
+
+this project hopes to create a long-term AI system that grows together with its user.
+
+---
+
+# 📜 License
+
+MIT License
