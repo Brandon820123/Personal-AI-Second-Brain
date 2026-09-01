@@ -64,6 +64,26 @@ Large Language Model
 v
 Answer + Sources
 
+## Phase 6B: Real-time Local Voice
+
+The PySide6 desktop interface keeps text generation independent from speech:
+
+```text
+Ollama token stream
+    -> natural sentence segmenter
+    -> local Piper synthesis FIFO
+    -> local WAV playback FIFO
+```
+
+- Chinese `。！？；` and English `. ! ?` boundaries release useful sentences.
+- Piper voice models are warmed and cached only while VOICE is enabled.
+- Synthesis and playback use separate workers, so the next sentence can be
+  prepared while the current sentence is playing.
+- Stop Speaking and explicit microphone activation immediately stop playback and
+  invalidate pending speech without cancelling the streamed text answer.
+- Voice input, STT, TTS, temporary audio, and playback remain on-device. There is
+  no wake word, background listening, voice cloning, or cloud speech service.
+
 ---
 
 # 🛠️ Technology Stack

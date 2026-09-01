@@ -9,3 +9,13 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Local knowledge base and personal documents
+data/chroma/
+data/config/language.json
+data/config/persona.json
+data/config/voice.json
+data/documents/
+data/voice/
+test.txt
+/*.pdf
