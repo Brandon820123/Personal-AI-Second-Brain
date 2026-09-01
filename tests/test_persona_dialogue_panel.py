@@ -19,6 +19,7 @@ from app.ui.avatar_widget import (
     ACTIVE_STATES,
     AVATAR_ASSET_PATHS,
     AVATAR_VISUAL_PROFILES,
+    FAIRY_ROTATION_DEGREES_PER_SECOND,
     PersonaAvatarWidget,
     avatar_cache_sizes,
     clear_avatar_pixmap_cache,
@@ -94,12 +95,35 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["fairy"]["searching"]["motion"],
-            "search_orbit",
+            "core_rotation",
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["fairy"]["error"]["motion"],
             "warning_ring",
         )
+
+    def test_fairy_active_states_use_one_constant_rotation_language(self):
+        active_motions = {
+            AVATAR_VISUAL_PROFILES["fairy"][state]["motion"]
+            for state in ACTIVE_STATES
+        }
+
+        self.assertEqual(active_motions, {"core_rotation"})
+        self.assertEqual(FAIRY_ROTATION_DEGREES_PER_SECOND, 72.0)
+
+    def test_fairy_rotation_keeps_widget_and_source_pixmap_stable(self):
+        avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        original_size = avatar.size()
+        original_pixmap_key = avatar.source_pixmap.cacheKey()
+
+        for state in ACTIVE_STATES:
+            avatar.set_state(state)
+            avatar.phase = 0.73
+            self.assertEqual(avatar.size(), original_size)
+            self.assertEqual(avatar.source_pixmap.cacheKey(), original_pixmap_key)
+
+        avatar.close()
+        avatar.deleteLater()
 
     def test_primary_states_have_distinct_rendered_overlays(self):
         for persona_id in ("delamain", "fairy"):

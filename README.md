@@ -94,11 +94,13 @@ The desktop UI uses processed, square Persona artwork from `assets/avatars/`:
 
 One reusable Qt avatar widget loads and caches source and high-DPI prepared
 pixmaps for dialogue panels, Persona selection cards, and the current-Persona
-header. Lightweight QPainter overlays make IDLE, LISTENING, SEARCHING, THINKING,
-and RESPONDING visually distinct without transforming the source portraits.
-Only the newest active dialogue panel may run these continuous effects;
-completed, hidden, header, selection, and SPEAKING avatars remain static. Missing
-image assets log a development warning and fall back to the programmatic renderer.
+header. Lightweight QPainter overlays provide Persona-specific motion without
+transforming the full source portraits. Fairy keeps its base image and size stable
+while a clipped inner ring layer, including its circular accent, rotates at a
+constant speed; it does not breathe, pulse, flash, scale, or emit listening waves.
+Only the newest active dialogue panel may run continuous effects; completed,
+hidden, header, selection, and SPEAKING avatars remain static. Missing image assets
+log a development warning and fall back to the programmatic renderer.
 
 ---
 
