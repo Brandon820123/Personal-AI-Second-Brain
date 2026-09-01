@@ -3,7 +3,13 @@
 import re
 from enum import Enum
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PySide6.QtCore import (
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPoint,
+    QPropertyAnimation,
+    Qt,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -226,19 +232,34 @@ class PersonaDialoguePanel(QFrame):
             self._start_appearance_animation()
 
     def _start_appearance_animation(self):
-        """Fade the panel in once using Qt's lightweight animation system."""
+        """Fade in and rise a few pixels using lightweight Qt animation."""
+        end_position = self.pos()
+        start_position = end_position + QPoint(0, 6)
+        self.move(start_position)
         self.opacity_effect = QGraphicsOpacityEffect(self)
         self.setGraphicsEffect(self.opacity_effect)
-        self.appearance_animation = QPropertyAnimation(
+        self.opacity_animation = QPropertyAnimation(
             self.opacity_effect,
             b"opacity",
             self,
         )
-        self.appearance_animation.setDuration(200)
-        self.appearance_animation.setStartValue(0.12)
-        self.appearance_animation.setEndValue(1.0)
-        self.appearance_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.opacity_animation.setDuration(200)
+        self.opacity_animation.setStartValue(0.12)
+        self.opacity_animation.setEndValue(1.0)
+        self.opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.position_animation = QPropertyAnimation(self, b"pos", self)
+        self.position_animation.setDuration(200)
+        self.position_animation.setStartValue(start_position)
+        self.position_animation.setEndValue(end_position)
+        self.position_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.appearance_animation = QParallelAnimationGroup(self)
+        self.appearance_animation.addAnimation(self.opacity_animation)
+        self.appearance_animation.addAnimation(self.position_animation)
         self.appearance_animation.start()
+
+    def set_avatar_animation_enabled(self, enabled):
+        """Delegate continuous-effect ownership to this panel's avatar."""
+        self.avatar.set_continuous_animation_enabled(enabled)
 
     def set_state(self, state):
         """Update status and avatar state while keeping the same panel instance."""

@@ -42,7 +42,7 @@ try:
     from .knowledge_library import delete_document, list_documents
     from .language_preferences import get_language_preference, infer_response_language
     from .personas import get_active_persona, list_personas, switch_persona
-    from .ui import PersonaDialoguePanel, PersonaState
+    from .ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
     from .ui_themes import build_stylesheet, get_theme
     from .voice.audio_player import LocalAudioPlayer
     from .voice.recorder import MicrophoneRecorder, list_audio_devices
@@ -66,7 +66,7 @@ except ImportError:
     from knowledge_library import delete_document, list_documents
     from language_preferences import get_language_preference, infer_response_language
     from personas import get_active_persona, list_personas, switch_persona
-    from ui import PersonaDialoguePanel, PersonaState
+    from ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
     from ui_themes import build_stylesheet, get_theme
     from voice.audio_player import LocalAudioPlayer
     from voice.recorder import MicrophoneRecorder, list_audio_devices
@@ -405,6 +405,14 @@ class MainWindow(QMainWindow):
         identity_layout = QHBoxLayout(self.identity_panel)
         identity_layout.setContentsMargins(18, 12, 18, 12)
         identity_layout.setSpacing(10)
+        self.identity_avatar = PersonaAvatarWidget(
+            self.active_persona["id"],
+            self.current_theme,
+            display_size=62,
+            animation_enabled=False,
+        )
+        self.identity_avatar.set_state(PersonaState.COMPLETE)
+        identity_layout.addWidget(self.identity_avatar)
         identity_text = QVBoxLayout()
         identity_text.setSpacing(2)
         self.identity_name = QLabel()
@@ -565,12 +573,24 @@ class MainWindow(QMainWindow):
         self.persona_group = QButtonGroup(self)
         self.persona_group.setExclusive(True)
         self.persona_buttons = {}
+        self.persona_avatar_widgets = {}
 
         for persona in list_personas():
             card = QFrame()
             card.setObjectName("personaCard")
-            card_layout = QVBoxLayout(card)
+            card_layout = QHBoxLayout(card)
             card_layout.setContentsMargins(20, 18, 20, 18)
+            card_layout.setSpacing(16)
+            avatar = PersonaAvatarWidget(
+                persona["id"],
+                get_theme(persona["id"]),
+                display_size=78,
+                animation_enabled=False,
+            )
+            avatar.set_state(PersonaState.COMPLETE)
+            card_layout.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
+            content_layout = QVBoxLayout()
+            content_layout.setSpacing(7)
             radio = QRadioButton(persona["display_name"])
             radio.setProperty("persona_id", persona["id"])
             description = QLabel(persona["style_description"])
@@ -578,11 +598,13 @@ class MainWindow(QMainWindow):
             description.setObjectName("mutedLabel")
             greeting = QLabel(f"问候：{persona['greeting']}")
             greeting.setWordWrap(True)
-            card_layout.addWidget(radio)
-            card_layout.addWidget(description)
-            card_layout.addWidget(greeting)
+            content_layout.addWidget(radio)
+            content_layout.addWidget(description)
+            content_layout.addWidget(greeting)
+            card_layout.addLayout(content_layout, 1)
             self.persona_group.addButton(radio)
             self.persona_buttons[persona["id"]] = radio
+            self.persona_avatar_widgets[persona["id"]] = avatar
             radio.toggled.connect(
                 lambda checked, persona_id=persona["id"]: (
                     self.change_persona(persona_id) if checked else None
@@ -1069,6 +1091,9 @@ class MainWindow(QMainWindow):
             self.messages_layout.removeWidget(row)
             row.deleteLater()
 
+        if self.current_ai_panel and self.chat_busy:
+            self.current_ai_panel.set_avatar_animation_enabled(True)
+
     def _voice_output_allowed(self):
         return bool(
             self.voice_settings["enabled"]
@@ -1291,6 +1316,11 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(build_stylesheet(self.current_theme))
         self.identity_name.setText(self.active_persona["display_name"].upper())
         self.identity_status.setText(self.current_theme["identity_status"])
+        self.identity_avatar.set_persona(
+            self.active_persona["id"],
+            self.current_theme,
+        )
+        self.identity_avatar.set_state(PersonaState.COMPLETE)
         self.idle_state.set_theme(self.current_theme)
 
     def eventFilter(self, watched, event):
@@ -1376,11 +1406,33 @@ class MainWindow(QMainWindow):
         text="",
     ):
         panel_persona = dict(persona or self.active_persona)
+        normalized_state = (
+            state if isinstance(state, PersonaState) else PersonaState(state)
+        )
+
+        if normalized_state not in {
+            PersonaState.IDLE,
+            PersonaState.COMPLETE,
+            PersonaState.ERROR,
+        }:
+            for existing_panel in self.message_container.findChildren(
+                PersonaDialoguePanel
+            ):
+                existing_panel.set_avatar_animation_enabled(False)
+
         panel = PersonaDialoguePanel(
             panel_persona,
             get_theme(panel_persona["id"]),
             state=state,
             text=text,
+        )
+        panel.set_avatar_animation_enabled(
+            normalized_state
+            not in {
+                PersonaState.IDLE,
+                PersonaState.COMPLETE,
+                PersonaState.ERROR,
+            }
         )
         row = MessageRow(panel, "ai")
         panel.message_row = row
@@ -1651,6 +1703,9 @@ class MainWindow(QMainWindow):
 
         if self.speech_queue:
             self.speech_queue.shutdown(wait=False)
+
+        for avatar in self.findChildren(PersonaAvatarWidget):
+            avatar.stop_animation()
 
         super().closeEvent(event)
 

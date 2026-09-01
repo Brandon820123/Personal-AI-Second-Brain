@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from app import gui
 from app.personas import get_persona
-from app.ui import PersonaDialoguePanel, PersonaState
+from app.ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
 from app.ui_themes import THEMES, build_stylesheet, get_theme
 
 
@@ -54,6 +54,22 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(self.window.knowledge_table.item(0, 2).text(), "1620")
         self.assertEqual(self.window.knowledge_table.item(0, 3).text(), "554")
         self.assertEqual(self.window.chat_mode.count(), 2)
+        self.assertIsInstance(self.window.identity_avatar, PersonaAvatarWidget)
+        self.assertEqual(
+            self.window.identity_avatar.persona_id,
+            self.window.active_persona["id"],
+        )
+        self.assertEqual(
+            set(self.window.persona_avatar_widgets),
+            {"delamain", "fairy", "neutral"},
+        )
+        self.assertTrue(
+            self.window.persona_avatar_widgets["delamain"].uses_image_asset
+        )
+        self.assertTrue(self.window.persona_avatar_widgets["fairy"].uses_image_asset)
+        self.assertFalse(
+            self.window.persona_avatar_widgets["neutral"].uses_image_asset
+        )
 
     @patch("app.gui.switch_persona")
     def test_persona_switch_updates_name_and_greeting(self, mock_switch):
@@ -83,6 +99,10 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(
             self.window.identity_status.text(),
             self.window.current_theme["identity_status"],
+        )
+        self.assertEqual(
+            self.window.identity_avatar.persona_id,
+            selected_persona["id"],
         )
         self.assertIn(
             self.window.current_theme["accent"],
@@ -214,7 +234,66 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(old_panel.persona_id, "delamain")
         self.assertEqual(old_panel.theme["id"], "delamain")
         self.assertEqual(old_panel.styleSheet(), old_stylesheet)
+        self.assertEqual(old_panel.avatar.asset_path.name, "delamain.png")
         self.assertEqual(panels[-1].persona_id, "fairy")
+        self.assertEqual(panels[-1].avatar.asset_path.name, "fairy.png")
+
+    @patch("app.gui.switch_persona")
+    def test_delamain_fairy_delamain_keeps_historical_avatar_assets(
+        self,
+        mock_switch,
+    ):
+        self.window.active_persona = get_persona("delamain")
+        self.window._update_persona_display()
+        original_panel = self.window._add_persona_panel(
+            get_persona("delamain"),
+            PersonaState.COMPLETE,
+            "Original Delamain answer",
+        )
+        mock_switch.side_effect = [get_persona("fairy"), get_persona("delamain")]
+
+        self.window.change_persona("fairy")
+        fairy_panel = self.window.findChildren(PersonaDialoguePanel)[-1]
+        self.window.change_persona("delamain")
+        final_panel = self.window.findChildren(PersonaDialoguePanel)[-1]
+
+        self.assertEqual(original_panel.avatar.asset_path.name, "delamain.png")
+        self.assertEqual(fairy_panel.avatar.asset_path.name, "fairy.png")
+        self.assertEqual(final_panel.avatar.asset_path.name, "delamain.png")
+        self.assertEqual(self.window.identity_avatar.persona_id, "delamain")
+
+    def test_only_newest_active_panel_runs_continuous_avatar_animation(self):
+        self.window.show()
+        first = self.window._add_persona_panel(
+            get_persona("delamain"),
+            PersonaState.SEARCHING,
+        )
+        self.app.processEvents()
+
+        self.assertTrue(first.avatar.animation_timer.isActive())
+
+        second = self.window._add_persona_panel(
+            get_persona("fairy"),
+            PersonaState.THINKING,
+        )
+        self.app.processEvents()
+
+        self.assertFalse(first.avatar.animation_timer.isActive())
+        self.assertTrue(second.avatar.animation_timer.isActive())
+
+        second.hide()
+        self.app.processEvents()
+        self.assertFalse(second.avatar.animation_timer.isActive())
+
+    def test_avatar_remains_square_when_window_is_resized(self):
+        self.window.show()
+        original_size = self.window.identity_avatar.size()
+
+        self.window.resize(1500, 940)
+        self.app.processEvents()
+
+        self.assertEqual(original_size.width(), original_size.height())
+        self.assertEqual(self.window.identity_avatar.size(), original_size)
 
     def test_idle_state_uses_active_persona_theme(self):
         self.assertTrue(self.window.idle_state.isVisibleTo(self.window))

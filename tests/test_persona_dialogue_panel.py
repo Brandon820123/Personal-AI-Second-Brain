@@ -1,20 +1,26 @@
-"""Tests for reusable Persona dialogue panels and original Qt avatars."""
+"""Tests for reusable Persona dialogue panels and cached image avatars."""
 
 import gc
 import os
+import tempfile
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from app.personas import get_persona
 from app.ui import PersonaDialoguePanel, PersonaState
 from app.ui.avatar_widget import (
     ACTIVE_STATES,
+    AVATAR_ASSET_PATHS,
     AVATAR_VISUAL_PROFILES,
     PersonaAvatarWidget,
+    avatar_cache_sizes,
+    clear_avatar_pixmap_cache,
 )
 from app.ui.persona_dialogue_panel import STATUS_TEXT, parse_source_groups
 from app.ui_themes import get_theme
@@ -52,9 +58,12 @@ class PersonaDialoguePanelTests(unittest.TestCase):
 
     def test_avatar_and_status_remain_synchronized_for_every_state(self):
         panel = self.make_panel("delamain")
+        panel.show()
+        self.app.processEvents()
 
         for state in PersonaState:
             panel.set_state(state)
+            self.app.processEvents()
 
             self.assertEqual(panel.state, state)
             self.assertEqual(panel.avatar.state, state.value)
@@ -76,11 +85,11 @@ class PersonaDialoguePanelTests(unittest.TestCase):
 
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["delamain"]["searching"]["motion"],
-            "search_ring",
+            "scan_border",
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["delamain"]["thinking"]["motion"],
-            "layer_analysis",
+            "glow_pulse",
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["fairy"]["searching"]["motion"],
@@ -88,14 +97,18 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["fairy"]["error"]["motion"],
-            "concerned",
+            "warning_ring",
         )
 
     def test_streaming_updates_the_same_panel_and_avatar(self):
         panel = self.make_panel("fairy", PersonaState.LISTENING)
         original_identity = id(panel)
+        panel.show()
+        self.app.processEvents()
 
         panel.set_state(PersonaState.THINKING)
+        self.app.processEvents()
+        self.assertTrue(panel.avatar.animation_timer.isActive())
         panel.append_text("找到")
         panel.append_text("资料了。")
 
@@ -103,7 +116,7 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         self.assertEqual(panel._text, "找到资料了。")
         self.assertEqual(panel.state, PersonaState.RESPONDING)
         self.assertEqual(panel.avatar.state, "responding")
-        self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertFalse(panel.avatar.animation_timer.isActive())
 
         panel.complete()
 
@@ -168,12 +181,92 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         self.assertNotIn("Traceback", panel.response_label.text())
         self.assertFalse(panel.avatar.animation_timer.isActive())
 
-    def test_avatar_is_programmatic_and_uses_the_panel_identity(self):
+    def test_avatar_uses_the_image_asset_and_panel_identity(self):
         panel = self.make_panel("delamain")
 
         self.assertIsInstance(panel.avatar, PersonaAvatarWidget)
         self.assertEqual(panel.avatar.persona_id, "delamain")
         self.assertEqual(panel.avatar.theme["accent"], get_theme("delamain")["accent"])
+        self.assertTrue(panel.avatar.uses_image_asset)
+        self.assertEqual(panel.avatar.asset_path, AVATAR_ASSET_PATHS["delamain"])
+
+    def test_avatar_assets_are_square_opaque_and_have_no_white_edge(self):
+        for persona_id in ("delamain", "fairy"):
+            image = QImage(str(AVATAR_ASSET_PATHS[persona_id]))
+
+            self.assertFalse(image.isNull())
+            self.assertEqual(image.width(), image.height())
+
+            edge_pixels = []
+
+            for position in range(image.width()):
+                edge_pixels.extend(
+                    (
+                        image.pixelColor(position, 0),
+                        image.pixelColor(position, image.height() - 1),
+                        image.pixelColor(0, position),
+                        image.pixelColor(image.width() - 1, position),
+                    )
+                )
+
+            self.assertTrue(all(pixel.alpha() == 255 for pixel in edge_pixels))
+            self.assertFalse(
+                any(
+                    pixel.red() > 248
+                    and pixel.green() > 248
+                    and pixel.blue() > 248
+                    for pixel in edge_pixels
+                )
+            )
+
+    def test_missing_avatar_logs_warning_and_uses_programmatic_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            missing_path = Path(temporary_directory) / "missing.png"
+
+            with self.assertLogs("app.ui.avatar_widget", level="WARNING"):
+                avatar = PersonaAvatarWidget(
+                    "delamain",
+                    get_theme("delamain"),
+                    asset_paths={"delamain": missing_path},
+                )
+
+            avatar.show()
+            self.app.processEvents()
+            fallback_image = avatar.grab().toImage()
+
+            self.assertFalse(avatar.uses_image_asset)
+            self.assertIn("programmatic fallback", avatar.asset_warning)
+            self.assertFalse(fallback_image.isNull())
+            avatar.close()
+            avatar.deleteLater()
+
+    def test_source_and_scaled_pixmaps_are_shared_by_widget_size(self):
+        clear_avatar_pixmap_cache()
+        first = PersonaAvatarWidget("fairy", get_theme("fairy"), display_size=78)
+        second = PersonaAvatarWidget("fairy", get_theme("fairy"), display_size=78)
+        first.show()
+        second.show()
+        self.app.processEvents()
+        first.grab()
+        second.grab()
+
+        self.assertEqual(avatar_cache_sizes(), {"source": 1, "prepared": 1})
+        first.close()
+        second.close()
+        first.deleteLater()
+        second.deleteLater()
+
+    def test_hidden_panel_stops_continuous_avatar_animation(self):
+        panel = self.make_panel("fairy", PersonaState.SEARCHING)
+        panel.show()
+        self.app.processEvents()
+
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+
+        panel.hide()
+        self.app.processEvents()
+
+        self.assertFalse(panel.avatar.animation_timer.isActive())
 
     def test_panel_uses_qt_fade_animation_when_shown(self):
         panel = self.make_panel("fairy")
@@ -182,6 +275,12 @@ class PersonaDialoguePanelTests(unittest.TestCase):
 
         self.assertTrue(panel._appearance_started)
         self.assertEqual(panel.appearance_animation.duration(), 200)
+        self.assertEqual(panel.appearance_animation.animationCount(), 2)
+        self.assertEqual(
+            panel.position_animation.startValue().y()
+            - panel.position_animation.endValue().y(),
+            6,
+        )
         self.assertIsNotNone(panel.graphicsEffect())
 
 

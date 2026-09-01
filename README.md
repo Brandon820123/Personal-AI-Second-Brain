@@ -84,6 +84,21 @@ Ollama token stream
 - Voice input, STT, TTS, temporary audio, and playback remain on-device. There is
   no wake word, background listening, voice cloning, or cloud speech service.
 
+## Persona Avatar Assets
+
+The desktop UI uses processed, square Persona artwork from `assets/avatars/`:
+
+- `delamain.png` is presented in a mildly rounded cyan system frame.
+- `fairy.png` is presented with a circular violet mask and halo.
+- Neutral retains the minimal programmatic placeholder.
+
+One reusable Qt avatar widget loads and caches source and high-DPI prepared
+pixmaps for dialogue panels, Persona selection cards, and the current-Persona
+header. State effects are drawn around the source artwork. Only the newest active
+dialogue panel may continuously animate SEARCHING or THINKING; completed, hidden,
+header, selection, and SPEAKING avatars remain static. Missing image assets log a
+development warning and fall back to the programmatic renderer.
+
 ---
 
 # 🛠️ Technology Stack
