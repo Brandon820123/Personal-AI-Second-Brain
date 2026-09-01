@@ -2,6 +2,7 @@
 
 import logging
 import math
+from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QLineF, QPointF, QRectF, QSize, QTimer, Qt
@@ -26,7 +27,18 @@ CONTINUOUS_ANIMATION_STATES = {
 }
 # Backward-compatible public name used by lifecycle tests.
 ACTIVE_STATES = CONTINUOUS_ANIMATION_STATES
-FAIRY_ROTATION_DEGREES_PER_SECOND = 72.0
+FAIRY_ROTATION_DEGREES_PER_SECOND = 42.0
+FAIRY_BREATHING_PERIOD_MS = 2600.0
+FAIRY_BREATHING_AMPLITUDE = 0.016
+FAIRY_BREATHING_MAX_SCALE = 1.0 + FAIRY_BREATHING_AMPLITUDE
+
+
+class AvatarAnimationMode(str, Enum):
+    """Separate visual motion ownership from the dialogue's semantic state."""
+
+    WORKING = "working"
+    IDLE_BREATHING = "idle_breathing"
+    HISTORY_STATIC = "history_static"
 
 AVATAR_VISUAL_PROFILES = {
     "delamain": {
@@ -97,12 +109,15 @@ class PersonaAvatarWidget(QWidget):
         self.theme = dict(theme)
         self.state = "idle"
         self.phase = 0.0
+        self.animation_mode = AvatarAnimationMode.WORKING
         self.asset_path = None
         self.asset_warning = ""
         self.source_pixmap = QPixmap()
         self._animation_enabled = bool(animation_enabled)
         self._asset_paths = dict(AVATAR_ASSET_PATHS)
         self._frame_clock = QElapsedTimer()
+        self._mode_clock = QElapsedTimer()
+        self._mode_origin_phase = 0.0
 
         if asset_paths is not None:
             self._asset_paths.update(asset_paths)
@@ -112,7 +127,7 @@ class PersonaAvatarWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.animation_timer = QTimer(self)
-        self.animation_timer.setInterval(33)
+        self.animation_timer.setInterval(16)
         self.animation_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.animation_timer.timeout.connect(self._advance_animation)
         self.set_persona(persona_id, theme)
@@ -151,20 +166,54 @@ class PersonaAvatarWidget(QWidget):
                     LOGGER.warning(self.asset_warning)
 
         self.phase = 0.0
+        self._mode_origin_phase = 0.0
+        self._mode_clock.restart()
         self._sync_animation_timer()
         self.update()
 
     def set_state(self, state):
-        """Update frame effects without modifying the underlying source image."""
-        self.state = getattr(state, "value", state)
-        self.phase = 0.0
-        self._sync_animation_timer()
+        """Update effects while preserving animation continuity between states."""
+        normalized_state = getattr(state, "value", state)
+
+        if normalized_state == self.state:
+            self._sync_animation_timer()
+            return
+
+        self.state = normalized_state
+        target_mode = (
+            AvatarAnimationMode.WORKING
+            if self.state_uses_continuous_animation(normalized_state)
+            else AvatarAnimationMode.HISTORY_STATIC
+        )
+        self.set_animation_mode(target_mode)
         self.update()
+
+    @staticmethod
+    def state_uses_continuous_animation(state):
+        """Return whether a presentation state owns a continuous timer."""
+        return getattr(state, "value", state) in CONTINUOUS_ANIMATION_STATES
 
     def set_continuous_animation_enabled(self, enabled):
         """Allow only the owning active panel to run a continuous effect."""
         self._animation_enabled = bool(enabled)
         self._sync_animation_timer()
+
+    def set_animation_mode(self, mode):
+        """Select static, working, or latest-response standby animation."""
+        normalized_mode = (
+            mode if isinstance(mode, AvatarAnimationMode) else AvatarAnimationMode(mode)
+        )
+
+        if normalized_mode is self.animation_mode:
+            self._sync_animation_timer()
+            return
+
+        self.animation_mode = normalized_mode
+        self.phase = 0.0
+        self._mode_origin_phase = 0.0
+        self._mode_clock.restart()
+        self._sync_animation_timer()
+        self.update()
 
     def stop_animation(self):
         """Stop this widget's timer immediately."""
@@ -193,29 +242,37 @@ class PersonaAvatarWidget(QWidget):
     def _sync_animation_timer(self):
         should_animate = (
             self._animation_enabled
-            and self.state in CONTINUOUS_ANIMATION_STATES
+            and self.animation_mode is not AvatarAnimationMode.HISTORY_STATIC
             and self.isVisible()
         )
 
         if should_animate and not self.animation_timer.isActive():
             self._frame_clock.restart()
+            self._mode_origin_phase = self.phase
+            self._mode_clock.restart()
             self.animation_timer.start()
         elif not should_animate:
             self.animation_timer.stop()
 
     def _advance_animation(self):
-        elapsed_ms = max(1, self._frame_clock.restart())
-
         if self.persona_id == "fairy":
-            phase_step = (
-                FAIRY_ROTATION_DEGREES_PER_SECOND
-                * elapsed_ms
-                / 360_000.0
-            )
-            self.phase = (self.phase + phase_step) % 1.0
+            elapsed_ms = max(0, self._mode_clock.elapsed())
+
+            if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+                self.phase = (elapsed_ms % FAIRY_BREATHING_PERIOD_MS) / (
+                    FAIRY_BREATHING_PERIOD_MS
+                )
+            else:
+                self.phase = (
+                    self._mode_origin_phase
+                    + FAIRY_ROTATION_DEGREES_PER_SECOND
+                    * elapsed_ms
+                    / 360_000.0
+                ) % 1.0
             self.update()
             return
 
+        elapsed_ms = max(1, self._frame_clock.restart())
         phase_steps = {
             "idle": 0.010,
             "listening": 0.024,
@@ -309,14 +366,30 @@ class PersonaAvatarWidget(QWidget):
         motion = profile["motion"]
         wave = (math.sin(self.phase * math.tau) + 1.0) / 2.0
         padding = max(6.0, self.width() * 0.07)
-        image_rect = QRectF(
+        base_image_rect = QRectF(
             padding,
             padding,
             self.width() - padding * 2,
             self.height() - padding * 2,
         )
+        image_rect = QRectF(base_image_rect)
         border_color = self._state_color()
         glow_strength = float(profile["glow"])
+        breathing_wave = (1.0 - math.cos(self.phase * math.tau)) / 2.0
+
+        if (
+            self.persona_id == "fairy"
+            and self.animation_mode is AvatarAnimationMode.IDLE_BREATHING
+        ):
+            breathing_scale = 1.0 + FAIRY_BREATHING_AMPLITUDE * breathing_wave
+            expansion = image_rect.width() * (breathing_scale - 1.0) / 2.0
+            image_rect = image_rect.adjusted(
+                -expansion,
+                -expansion,
+                expansion,
+                expansion,
+            )
+            glow_strength *= 0.85 + breathing_wave * 0.15
 
         if motion == "ambient_breathe":
             glow_strength *= 0.78 + wave * 0.22
@@ -333,7 +406,9 @@ class PersonaAvatarWidget(QWidget):
             painter.setBrush(surround)
             painter.drawRoundedRect(image_rect.adjusted(-2, -2, 2, 2), 8, 8)
 
-        avatar_pixmap = self._prepared_avatar_pixmap(round(image_rect.width()))
+        avatar_pixmap = self._prepared_avatar_pixmap(
+            round(base_image_rect.width())
+        )
         painter.drawPixmap(image_rect.toRect(), avatar_pixmap)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(border_color, float(profile["border"])))
@@ -356,7 +431,10 @@ class PersonaAvatarWidget(QWidget):
             self._paint_delamain_thinking_hud(painter, image_rect, border_color)
         elif motion == "response_pulse" and self.persona_id == "delamain":
             self._paint_delamain_response(painter, image_rect, border_color, wave)
-        elif motion == "core_rotation":
+        elif (
+            motion == "core_rotation"
+            and self.animation_mode is AvatarAnimationMode.WORKING
+        ):
             self._paint_fairy_core_rotation(painter, image_rect, avatar_pixmap)
 
         if motion in {"warning_frame", "warning_ring"}:

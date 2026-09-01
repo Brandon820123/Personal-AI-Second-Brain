@@ -98,9 +98,15 @@ header. Lightweight QPainter overlays provide Persona-specific motion without
 transforming the full source portraits. Fairy keeps its base image and size stable
 while a clipped inner ring layer, including its circular accent, rotates at a
 constant speed; it does not breathe, pulse, flash, scale, or emit listening waves.
-Only the newest active dialogue panel may run continuous effects; completed,
-hidden, header, selection, and SPEAKING avatars remain static. Missing image assets
-log a development warning and fall back to the programmatic renderer.
+Active-state transitions preserve the same avatar widget, rotation phase, and timer,
+so streamed RESPONDING text does not interrupt motion.
+After completion, only the latest Fairy response switches to a time-based,
+2.6-second 1.00–1.016 standby breathing loop; sending the next message makes it
+static history. A
+dedicated WORKING / IDLE_BREATHING / HISTORY_STATIC mode keeps this ownership separate
+from dialogue state. Hidden, header, selection, older completed, and SPEAKING
+avatars remain static. Missing image assets log a development warning and fall
+back to the programmatic renderer.
 
 ---
 

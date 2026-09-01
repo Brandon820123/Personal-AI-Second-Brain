@@ -42,7 +42,12 @@ try:
     from .knowledge_library import delete_document, list_documents
     from .language_preferences import get_language_preference, infer_response_language
     from .personas import get_active_persona, list_personas, switch_persona
-    from .ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
+    from .ui import (
+        AvatarAnimationMode,
+        PersonaAvatarWidget,
+        PersonaDialoguePanel,
+        PersonaState,
+    )
     from .ui_themes import build_stylesheet, get_theme
     from .voice.audio_player import LocalAudioPlayer
     from .voice.recorder import MicrophoneRecorder, list_audio_devices
@@ -66,7 +71,12 @@ except ImportError:
     from knowledge_library import delete_document, list_documents
     from language_preferences import get_language_preference, infer_response_language
     from personas import get_active_persona, list_personas, switch_persona
-    from ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
+    from ui import (
+        AvatarAnimationMode,
+        PersonaAvatarWidget,
+        PersonaDialoguePanel,
+        PersonaState,
+    )
     from ui_themes import build_stylesheet, get_theme
     from voice.audio_player import LocalAudioPlayer
     from voice.recorder import MicrophoneRecorder, list_audio_devices
@@ -267,6 +277,7 @@ class MainWindow(QMainWindow):
         self.documents = []
         self.worker_threads = set()
         self.current_ai_panel = None
+        self.latest_completed_fairy_panel = None
         self.current_chat_mode = None
         self.user_message_count = 0
         self.voice_recorder = None
@@ -1172,7 +1183,7 @@ class MainWindow(QMainWindow):
         context = self.streaming_speech_context
 
         if not context or context["panel"] is not panel:
-            panel.complete()
+            self._complete_persona_panel(panel)
             return
 
         self._queue_streamed_sentences(context["segmenter"].finish())
@@ -1180,7 +1191,7 @@ class MainWindow(QMainWindow):
         session_id = context["session_id"]
 
         if session_id is None or self.speech_queue is None:
-            panel.complete()
+            self._complete_persona_panel(panel)
             self.streaming_speech_context = None
             return
 
@@ -1260,7 +1271,7 @@ class MainWindow(QMainWindow):
         panel = context["panel"]
 
         if panel.state is not PersonaState.ERROR:
-            panel.complete()
+            self._complete_persona_panel(panel)
 
         self.streaming_speech_context = None
         self.voice_playback_panel = None
@@ -1300,7 +1311,7 @@ class MainWindow(QMainWindow):
             if self.chat_busy and panel is self.current_ai_panel:
                 panel.set_state(PersonaState.RESPONDING)
             else:
-                panel.complete()
+                self._complete_persona_panel(panel)
 
         self.streaming_speech_context = None
         self.voice_playback_panel = None
@@ -1409,11 +1420,11 @@ class MainWindow(QMainWindow):
         normalized_state = (
             state if isinstance(state, PersonaState) else PersonaState(state)
         )
+        continuous_animation = (
+            PersonaAvatarWidget.state_uses_continuous_animation(normalized_state)
+        )
 
-        if normalized_state not in {
-            PersonaState.COMPLETE,
-            PersonaState.ERROR,
-        }:
+        if continuous_animation:
             for existing_panel in self.message_container.findChildren(
                 PersonaDialoguePanel
             ):
@@ -1425,18 +1436,36 @@ class MainWindow(QMainWindow):
             state=state,
             text=text,
         )
-        panel.set_avatar_animation_enabled(
-            normalized_state
-            not in {
-                PersonaState.COMPLETE,
-                PersonaState.ERROR,
-            }
-        )
+        panel.set_avatar_animation_enabled(continuous_animation)
         row = MessageRow(panel, "ai")
         panel.message_row = row
         self.messages_layout.addWidget(row)
         self._scroll_conversation_to_bottom()
         return panel
+
+    def _retire_latest_fairy_idle_panel(self):
+        """Turn the previous standby Fairy response into static history."""
+        panel = self.latest_completed_fairy_panel
+        self.latest_completed_fairy_panel = None
+
+        if panel is None:
+            return
+
+        panel.set_avatar_animation_mode(AvatarAnimationMode.HISTORY_STATIC)
+        panel.set_avatar_animation_enabled(False)
+
+    def _complete_persona_panel(self, panel):
+        """Complete a response and give only the latest Fairy standby motion."""
+        if panel.persona_id != "fairy":
+            panel.complete()
+            return
+
+        if self.latest_completed_fairy_panel is not panel:
+            self._retire_latest_fairy_idle_panel()
+
+        panel.complete(keep_idle_animation=True)
+        panel.set_avatar_animation_enabled(True)
+        self.latest_completed_fairy_panel = panel
 
     def _scroll_conversation_to_bottom(self):
         bar = self.conversation_scroll.verticalScrollBar()
@@ -1453,6 +1482,7 @@ class MainWindow(QMainWindow):
             return
 
         self.stop_voice_playback()
+        self._retire_latest_fairy_idle_panel()
         self.message_input.clear()
         self.user_message_count += 1
         self.idle_state.setVisible(self.user_message_count < 2)

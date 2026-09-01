@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .avatar_widget import PersonaAvatarWidget
+from .avatar_widget import AvatarAnimationMode, PersonaAvatarWidget
 
 
 class PersonaState(str, Enum):
@@ -261,6 +261,10 @@ class PersonaDialoguePanel(QFrame):
         """Delegate continuous-effect ownership to this panel's avatar."""
         self.avatar.set_continuous_animation_enabled(enabled)
 
+    def set_avatar_animation_mode(self, mode):
+        """Select this panel's working, standby, or historical avatar motion."""
+        self.avatar.set_animation_mode(mode)
+
     def set_state(self, state):
         """Update status and avatar state while keeping the same panel instance."""
         normalized_state = state if isinstance(state, PersonaState) else PersonaState(state)
@@ -320,9 +324,12 @@ class PersonaDialoguePanel(QFrame):
 
         self.sources_section.setVisible(bool(self.source_groups))
 
-    def complete(self):
+    def complete(self, keep_idle_animation=False):
         """Mark a successfully streamed panel complete and keep it in history."""
         self.set_state(PersonaState.COMPLETE)
+
+        if keep_idle_animation and self.persona_id == "fairy":
+            self.avatar.set_animation_mode(AvatarAnimationMode.IDLE_BREATHING)
 
     def set_error(self, message):
         """Show a concise failure in this panel instead of a Python traceback."""

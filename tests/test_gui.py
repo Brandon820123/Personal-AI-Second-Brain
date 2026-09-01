@@ -7,11 +7,17 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app import gui
 from app.personas import get_persona
-from app.ui import PersonaAvatarWidget, PersonaDialoguePanel, PersonaState
+from app.ui import (
+    AvatarAnimationMode,
+    PersonaAvatarWidget,
+    PersonaDialoguePanel,
+    PersonaState,
+)
 from app.ui_themes import THEMES, build_stylesheet, get_theme
 
 
@@ -284,6 +290,111 @@ class GuiSmokeTests(unittest.TestCase):
         second.hide()
         self.app.processEvents()
         self.assertFalse(second.avatar.animation_timer.isActive())
+
+    def test_latest_completed_fairy_breathes_until_next_user_message(self):
+        self.window.active_persona = get_persona("fairy")
+        self.window._update_persona_display()
+        self.window.show()
+        panel = self.window._add_persona_panel(
+            get_persona("fairy"),
+            PersonaState.RESPONDING,
+            "First answer",
+        )
+        self.window.current_ai_panel = panel
+        self.window._complete_persona_panel(panel)
+        self.app.processEvents()
+
+        self.assertEqual(panel.state, PersonaState.COMPLETE)
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        idle_start_phase = panel.avatar.phase
+        QTest.qWait(100)
+        self.assertGreater(panel.avatar.phase, idle_start_phase)
+
+        self.window.message_input.setPlainText("Next question")
+
+        with patch.object(self.window, "_run_worker"):
+            self.window.send_message()
+
+        next_panel = self.window.current_ai_panel
+        self.app.processEvents()
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.HISTORY_STATIC,
+        )
+        self.assertFalse(panel.avatar.animation_timer.isActive())
+        self.assertEqual(panel.avatar.phase, 0.0)
+        self.assertIsNot(next_panel, panel)
+        self.assertEqual(next_panel.avatar.animation_mode, AvatarAnimationMode.WORKING)
+        self.assertTrue(next_panel.avatar.animation_timer.isActive())
+
+        next_panel.set_state(PersonaState.THINKING)
+        next_panel.append_text("Second answer")
+        self.window._complete_persona_panel(next_panel)
+        self.app.processEvents()
+
+        fairy_panels = [
+            candidate
+            for candidate in self.window.findChildren(PersonaDialoguePanel)
+            if candidate.persona_id == "fairy"
+        ]
+        animated_panels = [
+            candidate
+            for candidate in fairy_panels
+            if candidate.avatar.animation_timer.isActive()
+        ]
+        self.assertEqual(animated_panels, [next_panel])
+        self.assertEqual(
+            next_panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+
+    def test_five_fairy_answers_keep_exactly_one_animation_timer(self):
+        self.window.active_persona = get_persona("fairy")
+        self.window._update_persona_display()
+        self.window.show()
+        completed_panels = []
+
+        def finish_immediately(operation, message, **callbacks):
+            del operation, message
+            callbacks["on_state"]("thinking")
+            callbacks["on_token"]("Answer")
+            callbacks["on_success"](None)
+            callbacks["on_finished"]()
+
+        with patch.object(
+            self.window,
+            "_run_worker",
+            side_effect=finish_immediately,
+        ):
+            for question_number in range(5):
+                self.window.message_input.setPlainText(
+                    f"Question {question_number + 1}"
+                )
+                self.window.send_message()
+                self.app.processEvents()
+                completed_panels.append(self.window.current_ai_panel)
+                animated_panels = [
+                    panel
+                    for panel in completed_panels
+                    if panel.avatar.animation_timer.isActive()
+                ]
+                self.assertEqual(animated_panels, [self.window.current_ai_panel])
+
+        for historical_panel in completed_panels[:-1]:
+            self.assertEqual(
+                historical_panel.avatar.animation_mode,
+                AvatarAnimationMode.HISTORY_STATIC,
+            )
+            self.assertFalse(historical_panel.avatar.animation_timer.isActive())
+
+        self.assertEqual(
+            completed_panels[-1].avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
 
     def test_avatar_remains_square_when_window_is_resized(self):
         self.window.show()

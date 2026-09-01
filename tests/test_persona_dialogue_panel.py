@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -14,11 +15,14 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.personas import get_persona
-from app.ui import PersonaDialoguePanel, PersonaState
+from app.ui import AvatarAnimationMode, PersonaDialoguePanel, PersonaState
 from app.ui.avatar_widget import (
     ACTIVE_STATES,
     AVATAR_ASSET_PATHS,
     AVATAR_VISUAL_PROFILES,
+    FAIRY_BREATHING_AMPLITUDE,
+    FAIRY_BREATHING_MAX_SCALE,
+    FAIRY_BREATHING_PERIOD_MS,
     FAIRY_ROTATION_DEGREES_PER_SECOND,
     PersonaAvatarWidget,
     avatar_cache_sizes,
@@ -109,7 +113,7 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         }
 
         self.assertEqual(active_motions, {"core_rotation"})
-        self.assertEqual(FAIRY_ROTATION_DEGREES_PER_SECOND, 72.0)
+        self.assertEqual(FAIRY_ROTATION_DEGREES_PER_SECOND, 42.0)
 
     def test_fairy_rotation_keeps_widget_and_source_pixmap_stable(self):
         avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
@@ -122,6 +126,60 @@ class PersonaDialoguePanelTests(unittest.TestCase):
             self.assertEqual(avatar.size(), original_size)
             self.assertEqual(avatar.source_pixmap.cacheKey(), original_pixmap_key)
 
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_fairy_idle_breathing_uses_a_subtle_slow_mode(self):
+        panel = self.make_panel("fairy", PersonaState.RESPONDING)
+        panel.show()
+        self.app.processEvents()
+
+        panel.complete(keep_idle_animation=True)
+        self.app.processEvents()
+
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertEqual(FAIRY_BREATHING_PERIOD_MS, 2600.0)
+        self.assertEqual(FAIRY_BREATHING_AMPLITUDE, 0.016)
+        self.assertEqual(FAIRY_BREATHING_MAX_SCALE, 1.016)
+        self.assertEqual(panel.avatar.animation_timer.interval(), 16)
+
+    def test_fairy_phase_uses_absolute_elapsed_time_not_callback_count(self):
+        avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        avatar.set_state(PersonaState.THINKING)
+        avatar._mode_origin_phase = 0.25
+
+        with patch.object(avatar._mode_clock, "elapsed", return_value=1000):
+            avatar._advance_animation()
+
+        expected_phase = 0.25 + FAIRY_ROTATION_DEGREES_PER_SECOND / 360.0
+        self.assertAlmostEqual(avatar.phase, expected_phase, places=6)
+
+        with patch.object(avatar._mode_clock, "elapsed", return_value=2000):
+            avatar._advance_animation()
+
+        expected_phase = 0.25 + 2 * FAIRY_ROTATION_DEGREES_PER_SECOND / 360.0
+        self.assertAlmostEqual(avatar.phase, expected_phase, places=6)
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_fairy_breathing_reuses_one_prepared_pixmap_size(self):
+        clear_avatar_pixmap_cache()
+        avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        avatar.set_state(PersonaState.COMPLETE)
+        avatar.set_animation_mode(AvatarAnimationMode.IDLE_BREATHING)
+        avatar.show()
+
+        for phase in (0.0, 0.125, 0.25, 0.5, 0.75, 0.875):
+            avatar.phase = phase
+            avatar.update()
+            self.app.processEvents()
+            avatar.grab()
+
+        self.assertEqual(avatar_cache_sizes(), {"source": 1, "prepared": 1})
         avatar.close()
         avatar.deleteLater()
 
@@ -175,25 +233,52 @@ class PersonaDialoguePanelTests(unittest.TestCase):
     def test_streaming_updates_the_same_panel_and_avatar(self):
         panel = self.make_panel("fairy", PersonaState.LISTENING)
         original_identity = id(panel)
+        original_avatar_identity = id(panel.avatar)
+        original_timer_identity = id(panel.avatar.animation_timer)
         panel.show()
         self.app.processEvents()
 
         panel.set_state(PersonaState.THINKING)
         self.app.processEvents()
         self.assertTrue(panel.avatar.animation_timer.isActive())
+        QTest.qWait(90)
+        thinking_phase = panel.avatar.phase
         panel.append_text("找到")
+        responding_start_phase = panel.avatar.phase
         panel.append_text("资料了。")
 
         self.assertEqual(id(panel), original_identity)
+        self.assertEqual(id(panel.avatar), original_avatar_identity)
+        self.assertEqual(id(panel.avatar.animation_timer), original_timer_identity)
         self.assertEqual(panel._text, "找到资料了。")
         self.assertEqual(panel.state, PersonaState.RESPONDING)
         self.assertEqual(panel.avatar.state, "responding")
         self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertGreater(thinking_phase, 0.0)
+        self.assertAlmostEqual(responding_start_phase, thinking_phase, places=5)
+
+        QTest.qWait(100)
+        responding_later_phase = panel.avatar.phase
+        self.assertGreater(
+            (responding_later_phase - responding_start_phase) % 1.0,
+            0.0,
+        )
+
+        panel.append_text("继续生成。")
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertAlmostEqual(panel.avatar.phase, responding_later_phase, places=5)
 
         panel.complete()
+        completed_phase = panel.avatar.phase
+        QTest.qWait(100)
 
         self.assertEqual(panel.state, PersonaState.COMPLETE)
         self.assertFalse(panel.avatar.animation_timer.isActive())
+        self.assertEqual(panel.avatar.phase, completed_phase)
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.HISTORY_STATIC,
+        )
 
     def test_completed_historical_panel_remains_static(self):
         panel = self.make_panel("fairy", PersonaState.RESPONDING)
