@@ -265,7 +265,11 @@ class PersonaDialoguePanel(QFrame):
         """Select this panel's working, standby, or historical avatar motion."""
         self.avatar.set_animation_mode(mode)
 
-    def set_state(self, state):
+    def start_avatar_entry_reveal(self, target_mode=None):
+        """Reveal only the avatar internals, then settle into its lifecycle mode."""
+        self.avatar.start_entry_reveal(target_mode)
+
+    def set_state(self, state, preserve_avatar_mode=False):
         """Update status and avatar state while keeping the same panel instance."""
         normalized_state = state if isinstance(state, PersonaState) else PersonaState(state)
         self.state = normalized_state
@@ -279,7 +283,10 @@ class PersonaDialoguePanel(QFrame):
         self.style().polish(self)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
-        self.avatar.set_state(normalized_state)
+        self.avatar.set_state(
+            normalized_state,
+            preserve_animation_mode=preserve_avatar_mode,
+        )
 
     def append_text(self, text):
         """Append one streamed token without rebuilding the dialogue widget."""
@@ -326,10 +333,14 @@ class PersonaDialoguePanel(QFrame):
 
     def complete(self, keep_idle_animation=False):
         """Mark a successfully streamed panel complete and keep it in history."""
-        self.set_state(PersonaState.COMPLETE)
+        preserve_working_mode = bool(keep_idle_animation)
+        self.set_state(
+            PersonaState.COMPLETE,
+            preserve_avatar_mode=preserve_working_mode,
+        )
 
-        if keep_idle_animation and self.persona_id == "fairy":
-            self.avatar.set_animation_mode(AvatarAnimationMode.IDLE_BREATHING)
+        if preserve_working_mode:
+            self.avatar.set_entry_target_mode(AvatarAnimationMode.IDLE_BREATHING)
 
     def set_error(self, message):
         """Show a concise failure in this panel instead of a Python traceback."""

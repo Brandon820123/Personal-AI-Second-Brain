@@ -325,10 +325,20 @@ class GuiSmokeTests(unittest.TestCase):
             panel.avatar.animation_mode,
             AvatarAnimationMode.HISTORY_STATIC,
         )
+        self.assertTrue(panel.avatar.is_settling_to_static)
+        QTest.qWait(250)
         self.assertFalse(panel.avatar.animation_timer.isActive())
+        self.assertFalse(panel.avatar.is_settling_to_static)
         self.assertEqual(panel.avatar.phase, 0.0)
         self.assertIsNot(next_panel, panel)
-        self.assertEqual(next_panel.avatar.animation_mode, AvatarAnimationMode.WORKING)
+        self.assertEqual(
+            next_panel.avatar.animation_mode,
+            AvatarAnimationMode.ENTRY_REVEAL,
+        )
+        self.assertEqual(
+            next_panel.avatar.entry_target_mode,
+            AvatarAnimationMode.WORKING,
+        )
         self.assertTrue(next_panel.avatar.animation_timer.isActive())
 
         next_panel.set_state(PersonaState.THINKING)
@@ -347,6 +357,11 @@ class GuiSmokeTests(unittest.TestCase):
             if candidate.avatar.animation_timer.isActive()
         ]
         self.assertEqual(animated_panels, [next_panel])
+        self.assertEqual(
+            next_panel.avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        QTest.qWait(600)
         self.assertEqual(
             next_panel.avatar.animation_mode,
             AvatarAnimationMode.IDLE_BREATHING,
@@ -377,6 +392,7 @@ class GuiSmokeTests(unittest.TestCase):
                 self.window.send_message()
                 self.app.processEvents()
                 completed_panels.append(self.window.current_ai_panel)
+                QTest.qWait(250)
                 animated_panels = [
                     panel
                     for panel in completed_panels
@@ -392,9 +408,80 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertFalse(historical_panel.avatar.animation_timer.isActive())
 
         self.assertEqual(
+            completed_panels[-1].avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        QTest.qWait(600)
+        self.assertEqual(
             completed_panels[-1].avatar.animation_mode,
             AvatarAnimationMode.IDLE_BREATHING,
         )
+
+    def test_latest_chat_avatar_reveals_on_return_then_resumes_idle(self):
+        self.window._retire_latest_fairy_idle_panel()
+        self.window.active_persona = get_persona("fairy")
+        self.window._update_persona_display(add_greeting=True)
+        panel = self.window.latest_completed_fairy_panel
+        self.window.show()
+        self.app.processEvents()
+
+        self.assertEqual(panel.avatar.animation_mode, AvatarAnimationMode.ENTRY_REVEAL)
+        self.assertEqual(
+            panel.avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        QTest.qWait(600)
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+
+        self.window._show_page(1)
+        self.window._show_page(0)
+        self.app.processEvents()
+
+        self.assertEqual(panel.avatar.animation_mode, AvatarAnimationMode.ENTRY_REVEAL)
+        self.assertEqual(
+            panel.avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        QTest.qWait(600)
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+
+    def test_delamain_greeting_reveals_then_uses_latest_only_hud_idle(self):
+        self.window._retire_latest_idle_avatar_panel()
+        self.window.active_persona = get_persona("delamain")
+        self.window._update_persona_display(add_greeting=True)
+        panel = self.window.latest_idle_avatar_panel
+        self.window.show()
+        self.app.processEvents()
+
+        self.assertEqual(panel.avatar.animation_mode, AvatarAnimationMode.ENTRY_REVEAL)
+        self.assertEqual(
+            panel.avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        QTest.qWait(600)
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+
+        self.window.message_input.setPlainText("Next system request")
+
+        with patch.object(self.window, "_run_worker"):
+            self.window.send_message()
+
+        self.app.processEvents()
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.HISTORY_STATIC,
+        )
+        self.assertFalse(panel.avatar.animation_timer.isActive())
 
     def test_avatar_remains_square_when_window_is_resized(self):
         self.window.show()

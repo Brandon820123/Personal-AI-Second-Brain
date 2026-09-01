@@ -277,6 +277,7 @@ class MainWindow(QMainWindow):
         self.documents = []
         self.worker_threads = set()
         self.current_ai_panel = None
+        self.latest_idle_avatar_panel = None
         self.latest_completed_fairy_panel = None
         self.current_chat_mode = None
         self.user_message_count = 0
@@ -1344,7 +1345,11 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _show_page(self, index):
+        previous_index = self.pages.currentIndex()
         self.pages.setCurrentIndex(index)
+
+        if index == 0 and previous_index != 0:
+            self._reveal_latest_chat_avatar()
 
         if index == 1:
             self.refresh_library()
@@ -1415,6 +1420,7 @@ class MainWindow(QMainWindow):
         persona=None,
         state=PersonaState.IDLE,
         text="",
+        play_entry=False,
     ):
         panel_persona = dict(persona or self.active_persona)
         normalized_state = (
@@ -1424,11 +1430,12 @@ class MainWindow(QMainWindow):
             PersonaAvatarWidget.state_uses_continuous_animation(normalized_state)
         )
 
-        if continuous_animation:
+        if continuous_animation or play_entry:
             for existing_panel in self.message_container.findChildren(
                 PersonaDialoguePanel
             ):
-                existing_panel.set_avatar_animation_enabled(False)
+                if not existing_panel.avatar.is_settling_to_static:
+                    existing_panel.set_avatar_animation_enabled(False)
 
         panel = PersonaDialoguePanel(
             panel_persona,
@@ -1436,36 +1443,76 @@ class MainWindow(QMainWindow):
             state=state,
             text=text,
         )
-        panel.set_avatar_animation_enabled(continuous_animation)
+        panel.set_avatar_animation_enabled(continuous_animation or play_entry)
         row = MessageRow(panel, "ai")
         panel.message_row = row
         self.messages_layout.addWidget(row)
+
+        if play_entry:
+            target_mode = (
+                AvatarAnimationMode.WORKING
+                if continuous_animation
+                else AvatarAnimationMode.HISTORY_STATIC
+            )
+            panel.start_avatar_entry_reveal(target_mode)
+
         self._scroll_conversation_to_bottom()
         return panel
 
-    def _retire_latest_fairy_idle_panel(self):
-        """Turn the previous standby Fairy response into static history."""
-        panel = self.latest_completed_fairy_panel
+    def _reveal_latest_chat_avatar(self):
+        """Replay the internal reveal for the current/latest chat avatar only."""
+        panels = self.message_container.findChildren(PersonaDialoguePanel)
+
+        if not panels:
+            return
+
+        panel = (
+            self.current_ai_panel
+            if self.chat_busy and self.current_ai_panel in panels
+            else panels[-1]
+        )
+
+        for existing_panel in panels:
+            if existing_panel is not panel:
+                existing_panel.set_avatar_animation_enabled(False)
+
+        if PersonaAvatarWidget.state_uses_continuous_animation(panel.state):
+            target_mode = AvatarAnimationMode.WORKING
+        elif (
+            panel is self.latest_idle_avatar_panel
+            and panel.state is PersonaState.COMPLETE
+        ):
+            target_mode = AvatarAnimationMode.IDLE_BREATHING
+        else:
+            target_mode = AvatarAnimationMode.HISTORY_STATIC
+
+        panel.set_avatar_animation_enabled(True)
+        panel.start_avatar_entry_reveal(target_mode)
+
+    def _retire_latest_idle_avatar_panel(self):
+        """Turn the previous latest standby avatar into static history."""
+        panel = self.latest_idle_avatar_panel
+        self.latest_idle_avatar_panel = None
         self.latest_completed_fairy_panel = None
 
         if panel is None:
             return
 
         panel.set_avatar_animation_mode(AvatarAnimationMode.HISTORY_STATIC)
-        panel.set_avatar_animation_enabled(False)
+
+    def _retire_latest_fairy_idle_panel(self):
+        """Backward-compatible alias for the original Fairy-only lifecycle."""
+        self._retire_latest_idle_avatar_panel()
 
     def _complete_persona_panel(self, panel):
-        """Complete a response and give only the latest Fairy standby motion."""
-        if panel.persona_id != "fairy":
-            panel.complete()
-            return
-
-        if self.latest_completed_fairy_panel is not panel:
-            self._retire_latest_fairy_idle_panel()
+        """Complete a response and give only the latest avatar standby motion."""
+        if self.latest_idle_avatar_panel is not panel:
+            self._retire_latest_idle_avatar_panel()
 
         panel.complete(keep_idle_animation=True)
         panel.set_avatar_animation_enabled(True)
-        self.latest_completed_fairy_panel = panel
+        self.latest_idle_avatar_panel = panel
+        self.latest_completed_fairy_panel = panel if panel.persona_id == "fairy" else None
 
     def _scroll_conversation_to_bottom(self):
         bar = self.conversation_scroll.verticalScrollBar()
@@ -1482,7 +1529,7 @@ class MainWindow(QMainWindow):
             return
 
         self.stop_voice_playback()
-        self._retire_latest_fairy_idle_panel()
+        self._retire_latest_idle_avatar_panel()
         self.message_input.clear()
         self.user_message_count += 1
         self.idle_state.setVisible(self.user_message_count < 2)
@@ -1490,6 +1537,7 @@ class MainWindow(QMainWindow):
         self.current_ai_panel = self._add_persona_panel(
             persona=self.active_persona,
             state=PersonaState.LISTENING,
+            play_entry=True,
         )
         self._begin_streaming_speech(self.current_ai_panel, message)
         self._set_chat_busy(True)
@@ -1678,6 +1726,8 @@ class MainWindow(QMainWindow):
         if persona_id == self.active_persona["id"]:
             return
 
+        self._retire_latest_idle_avatar_panel()
+
         try:
             self.active_persona = switch_persona(persona_id)
         except Exception as error:
@@ -1704,10 +1754,19 @@ class MainWindow(QMainWindow):
             selected_button.blockSignals(False)
 
         if add_greeting:
-            self._add_persona_panel(
+            greeting_panel = self._add_persona_panel(
                 persona=self.active_persona,
                 state=PersonaState.COMPLETE,
                 text=self.active_persona["greeting"],
+                play_entry=True,
+            )
+
+            greeting_panel.avatar.set_entry_target_mode(
+                AvatarAnimationMode.IDLE_BREATHING
+            )
+            self.latest_idle_avatar_panel = greeting_panel
+            self.latest_completed_fairy_panel = (
+                greeting_panel if greeting_panel.persona_id == "fairy" else None
             )
 
         self.idle_state.setVisible(self.user_message_count < 2)

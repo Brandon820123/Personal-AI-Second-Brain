@@ -94,16 +94,28 @@ The desktop UI uses processed, square Persona artwork from `assets/avatars/`:
 
 One reusable Qt avatar widget loads and caches source and high-DPI prepared
 pixmaps for dialogue panels, Persona selection cards, and the current-Persona
-header. Lightweight QPainter overlays provide Persona-specific motion without
-transforming the full source portraits. Fairy keeps its base image and size stable
-while a clipped inner ring layer, including its circular accent, rotates at a
-constant speed; it does not breathe, pulse, flash, scale, or emit listening waves.
-Active-state transitions preserve the same avatar widget, rotation phase, and timer,
-so streamed RESPONDING text does not interrupt motion.
-After completion, only the latest Fairy response switches to a time-based,
-2.6-second 1.00–1.016 standby breathing loop; sending the next message makes it
-static history. A
-dedicated WORKING / IDLE_BREATHING / HISTORY_STATIC mode keeps this ownership separate
+header. Lightweight QPainter rendering separates each image avatar into a soft
+background aura/geometric layer, the sharp cached PNG core, and crisp foreground
+ring or HUD accents. Persona-specific motion is applied to those lightweight
+layers rather than distorting a portrait. Fairy keeps its base image and widget
+geometry stable while a clipped inner ring layer, including its circular accent,
+rotates at a constant speed during active work; it does not emit listening waves,
+flash, wobble, or rotate the entire PNG. Active-state transitions preserve the same
+avatar widget, rotation phase, and timer, so streamed RESPONDING text does not
+interrupt motion.
+
+The latest chat avatar uses a 550 ms `ENTRY_REVEAL` when chat first opens, the user
+returns to chat, switches Persona, or creates a new response card. The reveal is
+paint-only: internal opacity, 0.94-to-1.0 scale, six-pixel upward settling, glow
+activation, and a restrained ring/HUD sweep. It never changes widget geometry or
+reflows the dialogue card, and it retargets its post-reveal mode if dialogue state
+changes while tokens stream.
+After completion, only the latest response switches to a time-based standby loop.
+Fairy uses a 2.1-second 0.98–1.05 breathing scale plus gentle accent motion;
+Delamain keeps its portrait scale fixed and uses a restrained cyan HUD/glow pulse.
+Sending the next message settles Fairy back to base scale over 200 ms and makes
+the previous Persona avatar static history. A
+dedicated ENTRY_REVEAL / WORKING / IDLE_BREATHING / HISTORY_STATIC mode keeps this ownership separate
 from dialogue state. Hidden, header, selection, older completed, and SPEAKING
 avatars remain static. Missing image assets log a development warning and fall
 back to the programmatic renderer.

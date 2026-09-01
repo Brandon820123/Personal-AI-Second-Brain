@@ -6,7 +6,15 @@ from enum import Enum
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QLineF, QPointF, QRectF, QSize, QTimer, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import QWidget
 
 
@@ -28,14 +36,27 @@ CONTINUOUS_ANIMATION_STATES = {
 # Backward-compatible public name used by lifecycle tests.
 ACTIVE_STATES = CONTINUOUS_ANIMATION_STATES
 FAIRY_ROTATION_DEGREES_PER_SECOND = 42.0
-FAIRY_BREATHING_PERIOD_MS = 2600.0
-FAIRY_BREATHING_AMPLITUDE = 0.016
-FAIRY_BREATHING_MAX_SCALE = 1.0 + FAIRY_BREATHING_AMPLITUDE
+FAIRY_BREATHING_PERIOD_MS = 2100.0
+FAIRY_BREATHING_MIN_SCALE = 0.98
+FAIRY_BREATHING_MAX_SCALE = 1.05
+FAIRY_STATIC_SETTLE_MS = 200.0
+_FAIRY_BASE_SCALE_WAVE = (
+    1.0 - FAIRY_BREATHING_MIN_SCALE
+) / (FAIRY_BREATHING_MAX_SCALE - FAIRY_BREATHING_MIN_SCALE)
+FAIRY_BREATHING_START_PHASE = math.acos(
+    1.0 - 2.0 * _FAIRY_BASE_SCALE_WAVE
+) / math.tau
+FAIRY_WORKING_SETTLE_MS = 200.0
+ENTRY_REVEAL_DURATION_MS = 550.0
+ENTRY_REVEAL_START_SCALE = 0.94
+ENTRY_REVEAL_OFFSET_PX = 6.0
+AVATAR_LAYER_ORDER = ("background", "core", "foreground")
 
 
 class AvatarAnimationMode(str, Enum):
     """Separate visual motion ownership from the dialogue's semantic state."""
 
+    ENTRY_REVEAL = "entry_reveal"
     WORKING = "working"
     IDLE_BREATHING = "idle_breathing"
     HISTORY_STATIC = "history_static"
@@ -118,6 +139,15 @@ class PersonaAvatarWidget(QWidget):
         self._frame_clock = QElapsedTimer()
         self._mode_clock = QElapsedTimer()
         self._mode_origin_phase = 0.0
+        self._layer_origin_phase = 0.0
+        self._settle_clock = QElapsedTimer()
+        self._settling_to_static = False
+        self._settle_from_scale = 1.0
+        self._working_settle_clock = QElapsedTimer()
+        self._working_to_idle = False
+        self._working_exit_phase = 0.0
+        self._entry_clock = QElapsedTimer()
+        self._entry_target_mode = AvatarAnimationMode.HISTORY_STATIC
 
         if asset_paths is not None:
             self._asset_paths.update(asset_paths)
@@ -167,11 +197,17 @@ class PersonaAvatarWidget(QWidget):
 
         self.phase = 0.0
         self._mode_origin_phase = 0.0
+        self._layer_origin_phase = 0.0
+        self._settling_to_static = False
+        self._settle_from_scale = 1.0
+        self._working_to_idle = False
+        self._working_exit_phase = 0.0
+        self._entry_target_mode = AvatarAnimationMode.HISTORY_STATIC
         self._mode_clock.restart()
         self._sync_animation_timer()
         self.update()
 
-    def set_state(self, state):
+    def set_state(self, state, preserve_animation_mode=False):
         """Update effects while preserving animation continuity between states."""
         normalized_state = getattr(state, "value", state)
 
@@ -180,11 +216,23 @@ class PersonaAvatarWidget(QWidget):
             return
 
         self.state = normalized_state
+
         target_mode = (
             AvatarAnimationMode.WORKING
             if self.state_uses_continuous_animation(normalized_state)
             else AvatarAnimationMode.HISTORY_STATIC
         )
+
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            self._entry_target_mode = target_mode
+            self.update()
+            return
+
+        if preserve_animation_mode:
+            self._sync_animation_timer()
+            self.update()
+            return
+
         self.set_animation_mode(target_mode)
         self.update()
 
@@ -196,6 +244,10 @@ class PersonaAvatarWidget(QWidget):
     def set_continuous_animation_enabled(self, enabled):
         """Allow only the owning active panel to run a continuous effect."""
         self._animation_enabled = bool(enabled)
+
+        if not self._animation_enabled and self._settling_to_static:
+            self._finish_static_settle()
+
         self._sync_animation_timer()
 
     def set_animation_mode(self, mode):
@@ -208,15 +260,98 @@ class PersonaAvatarWidget(QWidget):
             self._sync_animation_timer()
             return
 
+        previous_mode = self.animation_mode
+
+        if (
+            previous_mode is AvatarAnimationMode.WORKING
+            and normalized_mode is AvatarAnimationMode.IDLE_BREATHING
+            and self.persona_id == "fairy"
+        ):
+            self._update_fairy_phase_from_clock()
+            self._working_exit_phase = self.phase
+            self._working_to_idle = True
+            self._working_settle_clock.restart()
+        else:
+            self._working_to_idle = False
+
+        if (
+            previous_mode is AvatarAnimationMode.IDLE_BREATHING
+            and normalized_mode is AvatarAnimationMode.HISTORY_STATIC
+            and self.persona_id == "fairy"
+            and self.state == "complete"
+        ):
+            self._update_fairy_phase_from_clock()
+            self._settle_from_scale = self._fairy_breathing_scale(self.phase)
+            self._settling_to_static = True
+            self._settle_clock.restart()
+        else:
+            self._settling_to_static = False
+
+        previous_layer_phase = self._layer_rotation_phase(self._entry_progress())
         self.animation_mode = normalized_mode
-        self.phase = 0.0
-        self._mode_origin_phase = 0.0
+
+        if normalized_mode is AvatarAnimationMode.IDLE_BREATHING:
+            self.phase = FAIRY_BREATHING_START_PHASE
+        else:
+            self.phase = 0.0
+
+        self._layer_origin_phase = previous_layer_phase
+        self._mode_origin_phase = self.phase
         self._mode_clock.restart()
         self._sync_animation_timer()
         self.update()
 
+    def start_entry_reveal(self, target_mode=None):
+        """Play one internal reveal, then continue in the requested mode."""
+        if target_mode is None:
+            target_mode = (
+                AvatarAnimationMode.WORKING
+                if self.state_uses_continuous_animation(self.state)
+                else AvatarAnimationMode.HISTORY_STATIC
+            )
+
+        self._entry_target_mode = (
+            target_mode
+            if isinstance(target_mode, AvatarAnimationMode)
+            else AvatarAnimationMode(target_mode)
+        )
+        self._working_to_idle = False
+        self._settling_to_static = False
+        self.animation_mode = AvatarAnimationMode.ENTRY_REVEAL
+        self.phase = 0.0
+        self._entry_clock.restart()
+        self._sync_animation_timer()
+        self.update()
+
+    def set_entry_target_mode(self, mode):
+        """Update where an in-progress reveal should settle."""
+        normalized_mode = (
+            mode if isinstance(mode, AvatarAnimationMode) else AvatarAnimationMode(mode)
+        )
+
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            self._entry_target_mode = normalized_mode
+        else:
+            self.set_animation_mode(normalized_mode)
+
+    @property
+    def is_settling_to_static(self):
+        return self._settling_to_static
+
+    @property
+    def is_transitioning_to_idle(self):
+        return self._working_to_idle
+
+    @property
+    def entry_target_mode(self):
+        return self._entry_target_mode
+
     def stop_animation(self):
         """Stop this widget's timer immediately."""
+        if self._settling_to_static:
+            self._finish_static_settle()
+
+        self._working_to_idle = False
         self.animation_timer.stop()
 
     def visual_profile(self):
@@ -232,17 +367,28 @@ class PersonaAvatarWidget(QWidget):
         self._sync_animation_timer()
 
     def hideEvent(self, event):
+        if self._settling_to_static:
+            self._finish_static_settle()
+
+        self._working_to_idle = False
         self.animation_timer.stop()
         super().hideEvent(event)
 
     def closeEvent(self, event):
+        if self._settling_to_static:
+            self._finish_static_settle()
+
+        self._working_to_idle = False
         self.animation_timer.stop()
         super().closeEvent(event)
 
     def _sync_animation_timer(self):
         should_animate = (
             self._animation_enabled
-            and self.animation_mode is not AvatarAnimationMode.HISTORY_STATIC
+            and (
+                self.animation_mode is not AvatarAnimationMode.HISTORY_STATIC
+                or self._settling_to_static
+            )
             and self.isVisible()
         )
 
@@ -250,25 +396,51 @@ class PersonaAvatarWidget(QWidget):
             self._frame_clock.restart()
             self._mode_origin_phase = self.phase
             self._mode_clock.restart()
+
+            if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+                self._entry_clock.restart()
+
             self.animation_timer.start()
         elif not should_animate:
             self.animation_timer.stop()
 
     def _advance_animation(self):
-        if self.persona_id == "fairy":
-            elapsed_ms = max(0, self._mode_clock.elapsed())
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            elapsed_ms = max(0, self._entry_clock.elapsed())
+            self.phase = min(1.0, elapsed_ms / ENTRY_REVEAL_DURATION_MS)
 
-            if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
-                self.phase = (elapsed_ms % FAIRY_BREATHING_PERIOD_MS) / (
-                    FAIRY_BREATHING_PERIOD_MS
-                )
+            if self.phase >= 1.0:
+                self._finish_entry_reveal()
             else:
-                self.phase = (
-                    self._mode_origin_phase
-                    + FAIRY_ROTATION_DEGREES_PER_SECOND
-                    * elapsed_ms
-                    / 360_000.0
-                ) % 1.0
+                self.update()
+            return
+
+        if self.persona_id == "fairy":
+            if self._settling_to_static:
+                if self._settle_clock.elapsed() >= FAIRY_STATIC_SETTLE_MS:
+                    self._finish_static_settle()
+                    self._sync_animation_timer()
+                else:
+                    self.update()
+                return
+
+            self._update_fairy_phase_from_clock()
+
+            if (
+                self._working_to_idle
+                and self._working_settle_clock.elapsed() >= FAIRY_WORKING_SETTLE_MS
+            ):
+                self._working_to_idle = False
+
+            self.update()
+            return
+
+        if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+            elapsed_ms = max(0, self._mode_clock.elapsed())
+            self.phase = (
+                self._mode_origin_phase
+                + elapsed_ms / FAIRY_BREATHING_PERIOD_MS
+            ) % 1.0
             self.update()
             return
 
@@ -283,6 +455,80 @@ class PersonaAvatarWidget(QWidget):
         phase_step = phase_steps.get(self.state, 0.0) * elapsed_ms / 60.0
         self.phase = (self.phase + phase_step) % 1.0
         self.update()
+
+    def _finish_entry_reveal(self):
+        target_mode = self._entry_target_mode
+        entry_exit_phase = self._layer_rotation_phase(1.0)
+        self.animation_mode = target_mode
+
+        if target_mode is AvatarAnimationMode.IDLE_BREATHING:
+            self.phase = FAIRY_BREATHING_START_PHASE
+        elif target_mode is AvatarAnimationMode.WORKING:
+            self.phase = entry_exit_phase
+        else:
+            self.phase = 0.0
+
+        self._layer_origin_phase = entry_exit_phase
+        self._mode_origin_phase = self.phase
+        self._mode_clock.restart()
+        self._sync_animation_timer()
+        self.update()
+
+    def _entry_progress(self):
+        if self.animation_mode is not AvatarAnimationMode.ENTRY_REVEAL:
+            return 1.0
+
+        return min(1.0, max(0.0, self._entry_clock.elapsed() / ENTRY_REVEAL_DURATION_MS))
+
+    def _update_fairy_phase_from_clock(self):
+        elapsed_ms = max(0, self._mode_clock.elapsed())
+
+        if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+            self.phase = (
+                self._mode_origin_phase
+                + elapsed_ms / FAIRY_BREATHING_PERIOD_MS
+            ) % 1.0
+        elif self.animation_mode is AvatarAnimationMode.WORKING:
+            self.phase = (
+                self._mode_origin_phase
+                + FAIRY_ROTATION_DEGREES_PER_SECOND
+                * elapsed_ms
+                / 360_000.0
+            ) % 1.0
+
+    @staticmethod
+    def _fairy_breathing_scale(phase):
+        wave = (1.0 - math.cos(float(phase) * math.tau)) / 2.0
+        return FAIRY_BREATHING_MIN_SCALE + wave * (
+            FAIRY_BREATHING_MAX_SCALE - FAIRY_BREATHING_MIN_SCALE
+        )
+
+    def _static_settle_scale(self):
+        if not self._settling_to_static:
+            return 1.0
+
+        progress = min(1.0, self._settle_clock.elapsed() / FAIRY_STATIC_SETTLE_MS)
+        eased_progress = (1.0 - math.cos(progress * math.pi)) / 2.0
+        return self._settle_from_scale + (
+            1.0 - self._settle_from_scale
+        ) * eased_progress
+
+    def _finish_static_settle(self):
+        self._settling_to_static = False
+        self._settle_from_scale = 1.0
+        self.phase = 0.0
+        self.update()
+
+    def _working_settle_phase(self):
+        progress = min(
+            1.0,
+            self._working_settle_clock.elapsed() / FAIRY_WORKING_SETTLE_MS,
+        )
+        eased_progress = (1.0 - math.cos(progress * math.pi)) / 2.0
+        shortest_delta = (-self._working_exit_phase + 0.5) % 1.0 - 0.5
+        return (
+            self._working_exit_phase + shortest_delta * eased_progress
+        ) % 1.0
 
     @staticmethod
     def _load_source_pixmap(asset_path):
@@ -376,12 +622,28 @@ class PersonaAvatarWidget(QWidget):
         border_color = self._state_color()
         glow_strength = float(profile["glow"])
         breathing_wave = (1.0 - math.cos(self.phase * math.tau)) / 2.0
+        entry_progress = self._entry_progress()
+        entry_ease = 1.0 - (1.0 - entry_progress) ** 3
+
+        painter.save()
+
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            entry_scale = ENTRY_REVEAL_START_SCALE + (
+                1.0 - ENTRY_REVEAL_START_SCALE
+            ) * entry_ease
+            center = QRectF(self.rect()).center()
+            painter.setOpacity(entry_ease)
+            painter.translate(0.0, ENTRY_REVEAL_OFFSET_PX * (1.0 - entry_ease))
+            painter.translate(center)
+            painter.scale(entry_scale, entry_scale)
+            painter.translate(-center)
+            glow_strength *= 0.60 + 0.40 * entry_ease
 
         if (
             self.persona_id == "fairy"
             and self.animation_mode is AvatarAnimationMode.IDLE_BREATHING
         ):
-            breathing_scale = 1.0 + FAIRY_BREATHING_AMPLITUDE * breathing_wave
+            breathing_scale = self._fairy_breathing_scale(self.phase)
             expansion = image_rect.width() * (breathing_scale - 1.0) / 2.0
             image_rect = image_rect.adjusted(
                 -expansion,
@@ -389,7 +651,18 @@ class PersonaAvatarWidget(QWidget):
                 expansion,
                 expansion,
             )
-            glow_strength *= 0.85 + breathing_wave * 0.15
+            glow_strength *= 0.80 + breathing_wave * 0.20
+        elif self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+            glow_strength *= 0.84 + breathing_wave * 0.16
+        elif self.persona_id == "fairy" and self._settling_to_static:
+            settle_scale = self._static_settle_scale()
+            expansion = image_rect.width() * (settle_scale - 1.0) / 2.0
+            image_rect = image_rect.adjusted(
+                -expansion,
+                -expansion,
+                expansion,
+                expansion,
+            )
 
         if motion == "ambient_breathe":
             glow_strength *= 0.78 + wave * 0.22
@@ -398,6 +671,13 @@ class PersonaAvatarWidget(QWidget):
         elif motion == "listening_hud":
             glow_strength *= 0.88 + wave * 0.18
 
+        self._paint_avatar_background(
+            painter,
+            image_rect,
+            border_color,
+            glow_strength,
+            entry_progress,
+        )
         self._paint_glow(painter, image_rect, border_color, glow_strength)
 
         if self.persona_id == "delamain":
@@ -406,9 +686,12 @@ class PersonaAvatarWidget(QWidget):
             painter.setBrush(surround)
             painter.drawRoundedRect(image_rect.adjusted(-2, -2, 2, 2), 8, 8)
 
-        avatar_pixmap = self._prepared_avatar_pixmap(
-            round(base_image_rect.width())
-        )
+        prepared_width = base_image_rect.width()
+
+        if self.persona_id == "fairy":
+            prepared_width *= FAIRY_BREATHING_MAX_SCALE
+
+        avatar_pixmap = self._prepared_avatar_pixmap(round(prepared_width))
         painter.drawPixmap(image_rect.toRect(), avatar_pixmap)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(border_color, float(profile["border"])))
@@ -431,14 +714,180 @@ class PersonaAvatarWidget(QWidget):
             self._paint_delamain_thinking_hud(painter, image_rect, border_color)
         elif motion == "response_pulse" and self.persona_id == "delamain":
             self._paint_delamain_response(painter, image_rect, border_color, wave)
-        elif (
-            motion == "core_rotation"
-            and self.animation_mode is AvatarAnimationMode.WORKING
-        ):
-            self._paint_fairy_core_rotation(painter, image_rect, avatar_pixmap)
+        elif motion == "core_rotation" and self.animation_mode in {
+            AvatarAnimationMode.ENTRY_REVEAL,
+            AvatarAnimationMode.WORKING,
+        }:
+            rotation_phase = (
+                self._layer_rotation_phase(entry_progress)
+                if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL
+                else self.phase
+            )
+            self._paint_fairy_core_rotation(
+                painter,
+                image_rect,
+                avatar_pixmap,
+                phase=rotation_phase,
+            )
+        elif self.persona_id == "fairy" and self._working_to_idle:
+            self._paint_fairy_core_rotation(
+                painter,
+                image_rect,
+                avatar_pixmap,
+                phase=self._working_settle_phase(),
+            )
+
+        self._paint_avatar_foreground(
+            painter,
+            image_rect,
+            border_color,
+            entry_progress,
+        )
 
         if motion in {"warning_frame", "warning_ring"}:
             self._paint_warning_overlay(painter, image_rect, border_color)
+
+        painter.restore()
+
+    def _paint_avatar_background(
+        self,
+        painter,
+        image_rect,
+        color,
+        glow_strength,
+        entry_progress,
+    ):
+        """Paint the soft aura and persona geometry behind the sharp PNG core."""
+        center = image_rect.center()
+        aura_radius = image_rect.width() * 0.58
+        aura = QRadialGradient(center, aura_radius)
+        inner = QColor(color)
+        inner.setAlpha(max(10, min(72, round(72 * glow_strength))))
+        edge = QColor(color)
+        edge.setAlpha(0)
+        aura.setColorAt(0.28, inner)
+        aura.setColorAt(1.0, edge)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(aura)
+        painter.drawEllipse(center, aura_radius, aura_radius)
+
+        if self.persona_id == "fairy":
+            geometry_color = QColor(self.theme.get("accent_bright", color.name()))
+            geometry_color.setAlpha(36)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(geometry_color, 1.15))
+            radius = image_rect.width() * 0.51
+            angle_offset = self._layer_rotation_phase(entry_progress) * math.tau
+            polygon = QPolygonF(
+                [
+                    QPointF(
+                        center.x() + math.cos(angle_offset + index * math.tau / 6) * radius,
+                        center.y() + math.sin(angle_offset + index * math.tau / 6) * radius,
+                    )
+                    for index in range(6)
+                ]
+            )
+            painter.drawPolygon(polygon)
+            return
+
+        if self.persona_id == "delamain":
+            hud_color = QColor(color)
+            hud_color.setAlpha(48)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(hud_color, 1.0))
+            painter.drawRoundedRect(image_rect.adjusted(-5, -4, 5, 4), 10, 10)
+            painter.drawLine(
+                QLineF(
+                    image_rect.left() - 8,
+                    center.y(),
+                    image_rect.left() - 3,
+                    center.y(),
+                )
+            )
+            painter.drawLine(
+                QLineF(
+                    image_rect.right() + 3,
+                    center.y(),
+                    image_rect.right() + 8,
+                    center.y(),
+                )
+            )
+
+    def _paint_avatar_foreground(self, painter, image_rect, color, entry_progress):
+        """Paint crisp ring/frame accents above the persona image."""
+        accent = QColor(self.theme.get("accent_bright", color.name()))
+        if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+            idle_wave = (1.0 - math.cos(self.phase * math.tau)) / 2.0
+            accent.setAlpha(round(150 + idle_wave * 35))
+        else:
+            accent.setAlpha(185)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if self.persona_id == "fairy":
+            ring_rect = image_rect.adjusted(-3.5, -3.5, 3.5, 3.5)
+            start_angle = self._layer_rotation_phase(entry_progress) * 360.0
+            painter.setPen(QPen(accent, 1.35, Qt.PenStyle.SolidLine))
+            painter.drawArc(ring_rect, round(start_angle * 16), round(72 * 16))
+            painter.drawArc(
+                ring_rect,
+                round((start_angle + 180) * 16),
+                round(38 * 16),
+            )
+            marker_angle = math.radians(start_angle + 72)
+            marker_radius = ring_rect.width() / 2.0
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(accent)
+            painter.drawEllipse(
+                QPointF(
+                    ring_rect.center().x() + math.cos(marker_angle) * marker_radius,
+                    ring_rect.center().y() - math.sin(marker_angle) * marker_radius,
+                ),
+                1.7,
+                1.7,
+            )
+        elif self.persona_id == "delamain":
+            painter.setPen(QPen(accent, 1.35))
+            length = image_rect.width() * 0.12
+            offset = 4.0
+            left = image_rect.left() - offset
+            right = image_rect.right() + offset
+            top = image_rect.top() - offset
+            bottom = image_rect.bottom() + offset
+
+            for x, direction_x in ((left, 1), (right, -1)):
+                for y, direction_y in ((top, 1), (bottom, -1)):
+                    painter.drawLine(QLineF(x, y, x + length * direction_x, y))
+                    painter.drawLine(QLineF(x, y, x, y + length * direction_y))
+
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            sweep = QColor(accent)
+            sweep.setAlpha(round(210 * math.sin(entry_progress * math.pi)))
+            painter.setPen(QPen(sweep, 1.4))
+
+            if self.persona_id == "fairy":
+                sweep_rect = image_rect.adjusted(-5, -5, 5, 5)
+                painter.drawArc(
+                    sweep_rect,
+                    round((90 - entry_progress * 300) * 16),
+                    round(48 * 16),
+                )
+            elif self.persona_id == "delamain":
+                sweep_y = image_rect.top() + image_rect.height() * entry_progress
+                painter.drawLine(
+                    QLineF(image_rect.left() - 3, sweep_y, image_rect.right() + 3, sweep_y)
+                )
+
+    def _layer_rotation_phase(self, entry_progress):
+        """Return a stable phase for decorative layers without extra timers."""
+        if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
+            return entry_progress * 0.42
+        if self.animation_mode is AvatarAnimationMode.WORKING:
+            return self.phase
+        if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+            return (
+                self._layer_origin_phase + self._mode_clock.elapsed() / 12_000.0
+            ) % 1.0
+        return self._layer_origin_phase
 
     def _paint_glow(self, painter, image_rect, color, strength):
         for expansion, alpha_scale in ((3.0, 0.64), (6.0, 0.30)):
@@ -571,7 +1020,13 @@ class PersonaAvatarWidget(QWidget):
             )
         )
 
-    def _paint_fairy_core_rotation(self, painter, image_rect, avatar_pixmap):
+    def _paint_fairy_core_rotation(
+        self,
+        painter,
+        image_rect,
+        avatar_pixmap,
+        phase=None,
+    ):
         """Rotate only the Fairy's inner ring pixels at a constant speed."""
         center = image_rect.center()
         outer_radius = image_rect.width() * 0.365
@@ -584,7 +1039,8 @@ class PersonaAvatarWidget(QWidget):
         painter.save()
         painter.setClipPath(ring_clip, Qt.ClipOperation.IntersectClip)
         painter.translate(center)
-        painter.rotate(self.phase * 360.0)
+        rotation_phase = self.phase if phase is None else phase
+        painter.rotate(rotation_phase * 360.0)
         painter.translate(-center)
         painter.drawPixmap(image_rect.toRect(), avatar_pixmap)
         painter.restore()

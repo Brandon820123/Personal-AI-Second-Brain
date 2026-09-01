@@ -18,12 +18,19 @@ from app.personas import get_persona
 from app.ui import AvatarAnimationMode, PersonaDialoguePanel, PersonaState
 from app.ui.avatar_widget import (
     ACTIVE_STATES,
+    AVATAR_LAYER_ORDER,
     AVATAR_ASSET_PATHS,
     AVATAR_VISUAL_PROFILES,
-    FAIRY_BREATHING_AMPLITUDE,
+    ENTRY_REVEAL_DURATION_MS,
+    ENTRY_REVEAL_OFFSET_PX,
+    ENTRY_REVEAL_START_SCALE,
     FAIRY_BREATHING_MAX_SCALE,
+    FAIRY_BREATHING_MIN_SCALE,
     FAIRY_BREATHING_PERIOD_MS,
+    FAIRY_BREATHING_START_PHASE,
     FAIRY_ROTATION_DEGREES_PER_SECOND,
+    FAIRY_STATIC_SETTLE_MS,
+    FAIRY_WORKING_SETTLE_MS,
     PersonaAvatarWidget,
     avatar_cache_sizes,
     clear_avatar_pixmap_cache,
@@ -142,10 +149,34 @@ class PersonaDialoguePanelTests(unittest.TestCase):
             AvatarAnimationMode.IDLE_BREATHING,
         )
         self.assertTrue(panel.avatar.animation_timer.isActive())
-        self.assertEqual(FAIRY_BREATHING_PERIOD_MS, 2600.0)
-        self.assertEqual(FAIRY_BREATHING_AMPLITUDE, 0.016)
-        self.assertEqual(FAIRY_BREATHING_MAX_SCALE, 1.016)
+        self.assertEqual(FAIRY_BREATHING_PERIOD_MS, 2100.0)
+        self.assertEqual(FAIRY_BREATHING_MIN_SCALE, 0.98)
+        self.assertEqual(FAIRY_BREATHING_MAX_SCALE, 1.05)
         self.assertEqual(panel.avatar.animation_timer.interval(), 16)
+        self.assertAlmostEqual(
+            panel.avatar._fairy_breathing_scale(FAIRY_BREATHING_START_PHASE),
+            1.0,
+            places=6,
+        )
+        self.assertEqual(panel.avatar._fairy_breathing_scale(0.0), 0.98)
+        self.assertEqual(panel.avatar._fairy_breathing_scale(0.5), 1.05)
+
+    def test_delamain_latest_idle_pulses_without_scaling_portrait(self):
+        panel = self.make_panel("delamain", PersonaState.RESPONDING)
+        panel.show()
+        original_size = panel.avatar.size()
+        panel.complete(keep_idle_animation=True)
+        self.app.processEvents()
+
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        start_phase = panel.avatar.phase
+        QTest.qWait(90)
+        self.assertGreater(panel.avatar.phase, start_phase)
+        self.assertEqual(panel.avatar.size(), original_size)
 
     def test_fairy_phase_uses_absolute_elapsed_time_not_callback_count(self):
         avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
@@ -166,6 +197,64 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         avatar.close()
         avatar.deleteLater()
 
+    def test_entry_reveal_is_time_based_and_preserves_widget_geometry(self):
+        avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        original_size = avatar.size()
+        avatar.start_entry_reveal(AvatarAnimationMode.WORKING)
+
+        with patch.object(
+            avatar._entry_clock,
+            "elapsed",
+            return_value=round(ENTRY_REVEAL_DURATION_MS / 2),
+        ):
+            avatar._advance_animation()
+            self.assertAlmostEqual(avatar.phase, 0.5, places=2)
+
+        self.assertEqual(avatar.size(), original_size)
+        self.assertEqual(ENTRY_REVEAL_DURATION_MS, 550.0)
+        self.assertEqual(ENTRY_REVEAL_START_SCALE, 0.94)
+        self.assertEqual(ENTRY_REVEAL_OFFSET_PX, 6.0)
+        self.assertEqual(AVATAR_LAYER_ORDER, ("background", "core", "foreground"))
+
+        with patch.object(
+            avatar._entry_clock,
+            "elapsed",
+            return_value=round(ENTRY_REVEAL_DURATION_MS),
+        ):
+            avatar._advance_animation()
+
+        self.assertEqual(avatar.animation_mode, AvatarAnimationMode.WORKING)
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_entry_reveal_retargets_without_recreating_avatar(self):
+        panel = self.make_panel("fairy", PersonaState.THINKING)
+        panel.show()
+        panel.start_avatar_entry_reveal(AvatarAnimationMode.WORKING)
+        avatar_identity = id(panel.avatar)
+
+        panel.append_text("Streaming")
+        panel.complete(keep_idle_animation=True)
+
+        self.assertEqual(id(panel.avatar), avatar_identity)
+        self.assertEqual(panel.avatar.animation_mode, AvatarAnimationMode.ENTRY_REVEAL)
+        self.assertEqual(
+            panel.avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+
+        with patch.object(
+            panel.avatar._entry_clock,
+            "elapsed",
+            return_value=round(ENTRY_REVEAL_DURATION_MS),
+        ):
+            panel.avatar._advance_animation()
+
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
+
     def test_fairy_breathing_reuses_one_prepared_pixmap_size(self):
         clear_avatar_pixmap_cache()
         avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
@@ -182,6 +271,49 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         self.assertEqual(avatar_cache_sizes(), {"source": 1, "prepared": 1})
         avatar.close()
         avatar.deleteLater()
+
+    def test_fairy_history_transition_settles_once_then_stops(self):
+        panel = self.make_panel("fairy", PersonaState.RESPONDING)
+        panel.show()
+        panel.complete(keep_idle_animation=True)
+        panel.avatar.phase = 0.5
+        panel.set_avatar_animation_mode(AvatarAnimationMode.HISTORY_STATIC)
+        self.app.processEvents()
+
+        self.assertTrue(panel.avatar.is_settling_to_static)
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertEqual(FAIRY_STATIC_SETTLE_MS, 200.0)
+        QTest.qWait(250)
+        self.assertFalse(panel.avatar.is_settling_to_static)
+        self.assertFalse(panel.avatar.animation_timer.isActive())
+        self.assertEqual(panel.avatar.phase, 0.0)
+
+    def test_fairy_working_to_idle_transition_starts_at_base_scale(self):
+        panel = self.make_panel("fairy", PersonaState.RESPONDING)
+        panel.show()
+        QTest.qWait(80)
+        avatar_identity = id(panel.avatar)
+        timer_identity = id(panel.avatar.animation_timer)
+
+        panel.complete(keep_idle_animation=True)
+        self.app.processEvents()
+
+        self.assertEqual(id(panel.avatar), avatar_identity)
+        self.assertEqual(id(panel.avatar.animation_timer), timer_identity)
+        self.assertTrue(panel.avatar.is_transitioning_to_idle)
+        self.assertAlmostEqual(
+            panel.avatar._fairy_breathing_scale(panel.avatar.phase),
+            1.0,
+            places=5,
+        )
+        self.assertEqual(FAIRY_WORKING_SETTLE_MS, 200.0)
+        QTest.qWait(250)
+        self.assertFalse(panel.avatar.is_transitioning_to_idle)
+        self.assertTrue(panel.avatar.animation_timer.isActive())
+        self.assertEqual(
+            panel.avatar.animation_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
 
     def test_primary_states_have_distinct_rendered_overlays(self):
         for persona_id in ("delamain", "fairy"):
