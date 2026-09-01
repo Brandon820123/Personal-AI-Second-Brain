@@ -17,37 +17,43 @@ AVATAR_ASSET_PATHS = {
     "fairy": AVATAR_DIRECTORY / "fairy.png",
 }
 
-CONTINUOUS_ANIMATION_STATES = {"searching", "thinking"}
+CONTINUOUS_ANIMATION_STATES = {
+    "idle",
+    "listening",
+    "searching",
+    "thinking",
+    "responding",
+}
 # Backward-compatible public name used by lifecycle tests.
 ACTIVE_STATES = CONTINUOUS_ANIMATION_STATES
 
 AVATAR_VISUAL_PROFILES = {
     "delamain": {
-        "idle": {"motion": "stable", "glow": 0.20, "border": 1.5},
-        "listening": {"motion": "bright_frame", "glow": 0.42, "border": 2.2},
-        "searching": {"motion": "scan_border", "glow": 0.46, "border": 2.0},
-        "thinking": {"motion": "glow_pulse", "glow": 0.42, "border": 1.8},
-        "responding": {"motion": "active_frame", "glow": 0.58, "border": 2.3},
+        "idle": {"motion": "ambient_breathe", "glow": 0.22, "border": 1.4},
+        "listening": {"motion": "listening_hud", "glow": 0.48, "border": 2.0},
+        "searching": {"motion": "vertical_scan", "glow": 0.50, "border": 1.8},
+        "thinking": {"motion": "hud_cycle", "glow": 0.46, "border": 1.7},
+        "responding": {"motion": "response_pulse", "glow": 0.66, "border": 2.3},
         "speaking": {"motion": "active_static", "glow": 0.62, "border": 2.4},
         "complete": {"motion": "stable_complete", "glow": 0.24, "border": 1.6},
         "error": {"motion": "warning_frame", "glow": 0.34, "border": 2.2},
     },
     "fairy": {
-        "idle": {"motion": "stable", "glow": 0.24, "border": 1.5},
-        "listening": {"motion": "bright_ring", "glow": 0.48, "border": 2.2},
+        "idle": {"motion": "ambient_breathe", "glow": 0.26, "border": 1.4},
+        "listening": {"motion": "listening_waves", "glow": 0.54, "border": 2.1},
         "searching": {"motion": "search_orbit", "glow": 0.50, "border": 1.9},
-        "thinking": {"motion": "halo_pulse", "glow": 0.46, "border": 1.8},
-        "responding": {"motion": "active_ring", "glow": 0.64, "border": 2.3},
+        "thinking": {"motion": "thinking_orbit", "glow": 0.48, "border": 1.8},
+        "responding": {"motion": "response_pulse", "glow": 0.68, "border": 2.3},
         "speaking": {"motion": "active_static", "glow": 0.68, "border": 2.4},
         "complete": {"motion": "stable_complete", "glow": 0.28, "border": 1.6},
         "error": {"motion": "warning_ring", "glow": 0.36, "border": 2.2},
     },
     "neutral": {
-        "idle": {"motion": "stable", "glow": 0.16, "border": 1.4},
+        "idle": {"motion": "ambient_breathe", "glow": 0.16, "border": 1.4},
         "listening": {"motion": "bright_frame", "glow": 0.30, "border": 1.8},
         "searching": {"motion": "search_orbit", "glow": 0.36, "border": 1.8},
         "thinking": {"motion": "glow_pulse", "glow": 0.32, "border": 1.7},
-        "responding": {"motion": "active_frame", "glow": 0.42, "border": 2.0},
+        "responding": {"motion": "response_pulse", "glow": 0.42, "border": 2.0},
         "speaking": {"motion": "active_static", "glow": 0.44, "border": 2.0},
         "complete": {"motion": "stable_complete", "glow": 0.18, "border": 1.4},
         "error": {"motion": "warning_frame", "glow": 0.28, "border": 2.0},
@@ -194,7 +200,14 @@ class PersonaAvatarWidget(QWidget):
             self.animation_timer.stop()
 
     def _advance_animation(self):
-        phase_step = 0.018 if self.state == "thinking" else 0.035
+        phase_steps = {
+            "idle": 0.010,
+            "listening": 0.024,
+            "searching": 0.035,
+            "thinking": 0.016,
+            "responding": 0.022,
+        }
+        phase_step = phase_steps.get(self.state, 0.0)
         self.phase = (self.phase + phase_step) % 1.0
         self.update()
 
@@ -289,8 +302,12 @@ class PersonaAvatarWidget(QWidget):
         border_color = self._state_color()
         glow_strength = float(profile["glow"])
 
-        if motion in {"glow_pulse", "halo_pulse"}:
-            glow_strength *= 0.64 + wave * 0.52
+        if motion == "ambient_breathe":
+            glow_strength *= 0.78 + wave * 0.22
+        elif motion == "response_pulse":
+            glow_strength *= 0.72 + wave * 0.42
+        elif motion in {"listening_hud", "listening_waves", "thinking_orbit"}:
+            glow_strength *= 0.88 + wave * 0.18
 
         self._paint_glow(painter, image_rect, border_color, glow_strength)
 
@@ -310,10 +327,34 @@ class PersonaAvatarWidget(QWidget):
         else:
             painter.drawRoundedRect(image_rect, 7, 7)
 
-        if motion == "scan_border":
+        if motion == "listening_hud":
+            self._paint_delamain_listening_hud(
+                painter,
+                image_rect,
+                border_color,
+                wave,
+            )
+        elif motion == "vertical_scan":
             self._paint_delamain_scan(painter, image_rect, border_color)
+        elif motion == "hud_cycle":
+            self._paint_delamain_thinking_hud(painter, image_rect, border_color)
+        elif motion == "response_pulse" and self.persona_id == "delamain":
+            self._paint_delamain_response(painter, image_rect, border_color, wave)
         elif motion == "search_orbit":
             self._paint_fairy_orbit(painter, image_rect, border_color)
+        elif motion == "listening_waves":
+            self._paint_fairy_listening_waves(
+                painter,
+                image_rect,
+                border_color,
+            )
+        elif motion == "thinking_orbit":
+            self._paint_fairy_thinking(painter, image_rect, border_color, wave)
+        elif motion == "response_pulse" and self.persona_id == "fairy":
+            self._paint_fairy_response(painter, image_rect, border_color, wave)
+
+        if motion in {"warning_frame", "warning_ring"}:
+            self._paint_warning_overlay(painter, image_rect, border_color)
 
     def _paint_glow(self, painter, image_rect, color, strength):
         for expansion, alpha_scale in ((3.0, 0.64), (6.0, 0.30)):
@@ -334,18 +375,116 @@ class PersonaAvatarWidget(QWidget):
                 painter.drawRoundedRect(glow_rect, 8 + expansion, 8 + expansion)
 
     def _paint_delamain_scan(self, painter, image_rect, color):
-        scan_color = QColor(color)
-        scan_color.setAlpha(210)
-        painter.setPen(QPen(scan_color, 2.2, Qt.PenStyle.SolidLine))
+        painter.save()
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(image_rect, 7, 7)
+        painter.setClipPath(clip_path)
         scan_y = image_rect.top() + image_rect.height() * self.phase
-        segment_height = max(8.0, image_rect.height() * 0.16)
-        start_y = max(image_rect.top(), scan_y - segment_height / 2)
-        end_y = min(image_rect.bottom(), scan_y + segment_height / 2)
+        band_color = QColor(color)
+        band_color.setAlpha(34)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(band_color)
+        painter.drawRect(
+            QRectF(
+                image_rect.left(),
+                scan_y - max(3.0, image_rect.height() * 0.045),
+                image_rect.width(),
+                max(6.0, image_rect.height() * 0.09),
+            )
+        )
+        scan_color = QColor(color)
+        scan_color.setAlpha(205)
+        painter.setPen(QPen(scan_color, 1.4, Qt.PenStyle.SolidLine))
+        painter.drawLine(QLineF(image_rect.left(), scan_y, image_rect.right(), scan_y))
+        painter.restore()
+
+        marker_color = QColor(color)
+        marker_color.setAlpha(220)
+        painter.setPen(QPen(marker_color, 1.6))
+        marker_half = max(3.0, image_rect.height() * 0.045)
+        for marker_x in (image_rect.left() - 3, image_rect.right() + 3):
+            painter.drawLine(
+                QLineF(marker_x, scan_y - marker_half, marker_x, scan_y + marker_half)
+            )
+
+    def _paint_delamain_listening_hud(self, painter, image_rect, color, wave):
+        hud_color = QColor(color)
+        hud_color.setAlpha(round(170 + 70 * wave))
+        painter.setPen(QPen(hud_color, 2.0))
+        length = image_rect.width() * 0.18
+        offset = 3.0
+        left = image_rect.left() - offset
+        right = image_rect.right() + offset
+        top = image_rect.top() - offset
+        bottom = image_rect.bottom() + offset
+        for x, x_direction in ((left, 1), (right, -1)):
+            for y, y_direction in ((top, 1), (bottom, -1)):
+                painter.drawLine(QLineF(x, y, x + length * x_direction, y))
+                painter.drawLine(QLineF(x, y, x, y + length * y_direction))
+
+        painter.setPen(QPen(hud_color, 1.2))
+        side_length = image_rect.height() * (0.12 + 0.04 * wave)
+        center_y = image_rect.center().y()
         painter.drawLine(
-            QLineF(image_rect.left() - 2, start_y, image_rect.left() - 2, end_y)
+            QLineF(left - 2, center_y - side_length, left - 2, center_y + side_length)
         )
         painter.drawLine(
-            QLineF(image_rect.right() + 2, start_y, image_rect.right() + 2, end_y)
+            QLineF(right + 2, center_y - side_length, right + 2, center_y + side_length)
+        )
+
+    def _paint_delamain_thinking_hud(self, painter, image_rect, color):
+        segment_length = image_rect.width() * 0.25
+        inset = 2.5
+        sides = (
+            QLineF(image_rect.left() + inset, image_rect.top() - inset,
+                   image_rect.left() + inset + segment_length, image_rect.top() - inset),
+            QLineF(image_rect.right() + inset, image_rect.top() + inset,
+                   image_rect.right() + inset, image_rect.top() + inset + segment_length),
+            QLineF(image_rect.right() - inset, image_rect.bottom() + inset,
+                   image_rect.right() - inset - segment_length, image_rect.bottom() + inset),
+            QLineF(image_rect.left() - inset, image_rect.bottom() - inset,
+                   image_rect.left() - inset, image_rect.bottom() - inset - segment_length),
+        )
+        active_side = int(self.phase * len(sides)) % len(sides)
+
+        for index, line in enumerate(sides):
+            distance = (index - active_side) % len(sides)
+            hud_color = QColor(color)
+            hud_color.setAlpha(max(60, 235 - distance * 52))
+            painter.setPen(QPen(hud_color, 2.2 if distance == 0 else 1.4))
+            painter.drawLine(line)
+
+        center = image_rect.center()
+        indicator = QColor(color)
+        indicator.setAlpha(210)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(indicator)
+        angle = self.phase * math.tau
+        marker_radius = image_rect.width() * 0.42
+        painter.drawEllipse(
+            QPointF(
+                center.x() + math.cos(angle) * marker_radius,
+                center.y() + math.sin(angle) * marker_radius,
+            ),
+            1.8,
+            1.8,
+        )
+
+    def _paint_delamain_response(self, painter, image_rect, color, wave):
+        response_color = QColor(color)
+        response_color.setAlpha(round(145 + 90 * wave))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(response_color, 1.2 + wave * 1.2))
+        painter.drawRoundedRect(image_rect.adjusted(-3, -3, 3, 3), 9, 9)
+        bar_width = image_rect.width() * (0.28 + 0.18 * wave)
+        bar_y = image_rect.bottom() + 5
+        painter.drawLine(
+            QLineF(
+                image_rect.center().x() - bar_width / 2,
+                bar_y,
+                image_rect.center().x() + bar_width / 2,
+                bar_y,
+            )
         )
 
     def _paint_fairy_orbit(self, painter, image_rect, color):
@@ -356,6 +495,85 @@ class PersonaAvatarWidget(QWidget):
         painter.setPen(QPen(orbit_color, 2.1))
         start_angle = int(-self.phase * 360 * 16)
         painter.drawArc(orbit_rect, start_angle, 76 * 16)
+
+        trailing = QColor(color)
+        trailing.setAlpha(90)
+        painter.setPen(QPen(trailing, 1.3))
+        painter.drawArc(orbit_rect, start_angle - 42 * 16, 26 * 16)
+
+    def _paint_fairy_listening_waves(self, painter, image_rect, color):
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        for index in range(2):
+            progress = (self.phase + index * 0.5) % 1.0
+            expansion = 2.0 + progress * 5.0
+            wave_color = QColor(color)
+            wave_color.setAlpha(round(180 * (1.0 - progress)))
+            painter.setPen(QPen(wave_color, 1.8 - progress * 0.5))
+            wave_rect = image_rect.adjusted(
+                -expansion,
+                -expansion,
+                expansion,
+                expansion,
+            )
+            painter.drawArc(wave_rect, 128 * 16, 104 * 16)
+            painter.drawArc(wave_rect, -52 * 16, 104 * 16)
+
+    def _paint_fairy_thinking(self, painter, image_rect, color, wave):
+        ring_rect = image_rect.adjusted(-3.5, -3.5, 3.5, 3.5)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        for offset, alpha in ((0, 235), (180, 120)):
+            arc_color = QColor(color)
+            arc_color.setAlpha(alpha)
+            painter.setPen(QPen(arc_color, 2.1 if offset == 0 else 1.3))
+            start = int((-self.phase * 360 + offset) * 16)
+            painter.drawArc(ring_rect, start, 82 * 16)
+
+        center_color = QColor(color)
+        center_color.setAlpha(round(55 + 65 * wave))
+        painter.setPen(QPen(center_color, 1.2 + wave * 0.8))
+        center_radius = image_rect.width() * (0.105 + 0.025 * wave)
+        painter.drawEllipse(image_rect.center(), center_radius, center_radius)
+
+    def _paint_fairy_response(self, painter, image_rect, color, wave):
+        pulse_color = QColor(color)
+        pulse_color.setAlpha(round(125 + 100 * wave))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(pulse_color, 1.6 + wave * 1.2))
+        expansion = 2.0 + wave * 2.5
+        painter.drawEllipse(
+            image_rect.adjusted(-expansion, -expansion, expansion, expansion)
+        )
+        tick_color = QColor(color)
+        tick_color.setAlpha(round(120 + 85 * wave))
+        painter.setPen(QPen(tick_color, 1.5))
+        center = image_rect.center()
+        inner_radius = image_rect.width() * 0.48
+        outer_radius = inner_radius + 3.0
+
+        for degrees in (45, 135, 225, 315):
+            angle = math.radians(degrees)
+            painter.drawLine(
+                QLineF(
+                    center.x() + math.cos(angle) * inner_radius,
+                    center.y() + math.sin(angle) * inner_radius,
+                    center.x() + math.cos(angle) * outer_radius,
+                    center.y() + math.sin(angle) * outer_radius,
+                )
+            )
+
+    def _paint_warning_overlay(self, painter, image_rect, color):
+        warning_color = QColor(color)
+        warning_color.setAlpha(210)
+        warning_pen = QPen(warning_color, 1.8, Qt.PenStyle.DashLine)
+        painter.setPen(warning_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if self.persona_id == "fairy":
+            painter.drawEllipse(image_rect.adjusted(-3, -3, 3, 3))
+        else:
+            painter.drawRoundedRect(image_rect.adjusted(-3, -3, 3, 3), 9, 9)
 
     def _paint_delamain_fallback(self, painter):
         color = self._state_color()

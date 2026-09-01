@@ -1411,7 +1411,6 @@ class MainWindow(QMainWindow):
         )
 
         if normalized_state not in {
-            PersonaState.IDLE,
             PersonaState.COMPLETE,
             PersonaState.ERROR,
         }:
@@ -1429,7 +1428,6 @@ class MainWindow(QMainWindow):
         panel.set_avatar_animation_enabled(
             normalized_state
             not in {
-                PersonaState.IDLE,
                 PersonaState.COMPLETE,
                 PersonaState.ERROR,
             }

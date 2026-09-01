@@ -94,10 +94,11 @@ The desktop UI uses processed, square Persona artwork from `assets/avatars/`:
 
 One reusable Qt avatar widget loads and caches source and high-DPI prepared
 pixmaps for dialogue panels, Persona selection cards, and the current-Persona
-header. State effects are drawn around the source artwork. Only the newest active
-dialogue panel may continuously animate SEARCHING or THINKING; completed, hidden,
-header, selection, and SPEAKING avatars remain static. Missing image assets log a
-development warning and fall back to the programmatic renderer.
+header. Lightweight QPainter overlays make IDLE, LISTENING, SEARCHING, THINKING,
+and RESPONDING visually distinct without transforming the source portraits.
+Only the newest active dialogue panel may run these continuous effects;
+completed, hidden, header, selection, and SPEAKING avatars remain static. Missing
+image assets log a development warning and fall back to the programmatic renderer.
 
 ---
 

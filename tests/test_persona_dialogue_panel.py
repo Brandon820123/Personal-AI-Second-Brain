@@ -1,6 +1,7 @@
 """Tests for reusable Persona dialogue panels and cached image avatars."""
 
 import gc
+import hashlib
 import os
 import tempfile
 import unittest
@@ -85,11 +86,11 @@ class PersonaDialoguePanelTests(unittest.TestCase):
 
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["delamain"]["searching"]["motion"],
-            "scan_border",
+            "vertical_scan",
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["delamain"]["thinking"]["motion"],
-            "glow_pulse",
+            "hud_cycle",
         )
         self.assertEqual(
             AVATAR_VISUAL_PROFILES["fairy"]["searching"]["motion"],
@@ -99,6 +100,53 @@ class PersonaDialoguePanelTests(unittest.TestCase):
             AVATAR_VISUAL_PROFILES["fairy"]["error"]["motion"],
             "warning_ring",
         )
+
+    def test_primary_states_have_distinct_rendered_overlays(self):
+        for persona_id in ("delamain", "fairy"):
+            avatar = PersonaAvatarWidget(persona_id, get_theme(persona_id))
+            avatar.show()
+            self.app.processEvents()
+            signatures = {}
+
+            for state in (
+                PersonaState.IDLE,
+                PersonaState.LISTENING,
+                PersonaState.SEARCHING,
+                PersonaState.THINKING,
+                PersonaState.RESPONDING,
+            ):
+                avatar.set_state(state)
+                avatar.phase = 0.31
+                avatar.update()
+                self.app.processEvents()
+                image = avatar.grab().toImage()
+                signatures[state] = hashlib.sha256(
+                    image.bits().tobytes()
+                ).hexdigest()
+
+            self.assertEqual(len(set(signatures.values())), len(signatures))
+            avatar.close()
+            avatar.deleteLater()
+
+    def test_every_continuous_state_changes_between_animation_frames(self):
+        avatar = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        avatar.show()
+        self.app.processEvents()
+
+        for state in ACTIVE_STATES:
+            avatar.set_state(state)
+            avatar.phase = 0.12
+            avatar.update()
+            self.app.processEvents()
+            before = avatar.grab().toImage().bits().tobytes()
+            avatar.phase = 0.48
+            avatar.update()
+            self.app.processEvents()
+            after = avatar.grab().toImage().bits().tobytes()
+            self.assertNotEqual(before, after, state)
+
+        avatar.close()
+        avatar.deleteLater()
 
     def test_streaming_updates_the_same_panel_and_avatar(self):
         panel = self.make_panel("fairy", PersonaState.LISTENING)
@@ -116,7 +164,7 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         self.assertEqual(panel._text, "找到资料了。")
         self.assertEqual(panel.state, PersonaState.RESPONDING)
         self.assertEqual(panel.avatar.state, "responding")
-        self.assertFalse(panel.avatar.animation_timer.isActive())
+        self.assertTrue(panel.avatar.animation_timer.isActive())
 
         panel.complete()
 
