@@ -104,12 +104,43 @@ flash, wobble, or rotate the entire PNG. Active-state transitions preserve the s
 avatar widget, rotation phase, and timer, so streamed RESPONDING text does not
 interrupt motion.
 
+Persona timing and overlay policy live behind `PersonaAnimationProfile` in
+`app/ui/avatar_animation_profiles.py`. `FairyAnimationProfile` retains the circular
+companion language, while `DelamainAnimationProfile` owns a separate formal HUD
+renderer for boot, listening, vertical knowledge scan, processing, responding,
+online, and restrained error visuals. The generic widget remains responsible for
+pixmap caching, fixed geometry, timer ownership, and three-layer composition.
+
 The latest chat avatar uses a 550 ms `ENTRY_REVEAL` when chat first opens, the user
 returns to chat, switches Persona, or creates a new response card. The reveal is
 paint-only: internal opacity, 0.94-to-1.0 scale, six-pixel upward settling, glow
 activation, and a restrained ring/HUD sweep. It never changes widget geometry or
 reflows the dialogue card, and it retargets its post-reveal mode if dialogue state
 changes while tokens stream.
+
+Delamain overrides that shared entry timing with a 720 ms system-boot sequence:
+HUD atmosphere activates first, the portrait fades in from 0.95 scale, one cyan
+scan passes through the frame, and the system stabilizes without bounce or
+overshoot. Its idle portrait remains completely fixed while frame brightness
+cycles smoothly from 100% to 85% and back over four seconds. The former dot and
+below-avatar scan-wave indicators are replaced by a clipped face-identification
+scan: once per four-second idle cycle, a 14%-height cyan gradient band spends 1.5
+seconds passing through the portrait with shallow rippled scan lines and a brief
+frame response. A persistent 8-by-10 low-opacity sampling grid, fine electronic
+refresh lines, and three shallow horizontal refraction traces keep the full face
+digitally active between scans without moving or deforming the source portrait.
+The grid strengthens locally inside the scan band. SEARCHING uses the strongest
+continuous scan, while THINKING uses a restrained 1.6-second continuous scan and
+stronger monitoring surface. No effect spills into message text or resembles an
+audio equalizer, heartbeat, or water ripple.
+
+Delamain's core renderer also divides the complete square portrait into 18 clipped
+horizontal signal strips and applies sub-pixel, phase-driven lateral refraction of
+at most one logical pixel. A broad 56%-height gradient scan curtain simultaneously
+modulates the whole portrait tint, grid clarity, local contrast impression, and HUD
+frame response. This makes the face, dark background, sampling surface, and frame
+read as one monitored digital window while retaining the cached source image and
+avoiding frame-by-frame bitmap generation.
 After completion, only the latest response switches to a time-based standby loop.
 Fairy uses a 2.1-second 0.98–1.05 breathing scale plus gentle accent motion;
 Delamain keeps its portrait scale fixed and uses a restrained cyan HUD/glow pulse.

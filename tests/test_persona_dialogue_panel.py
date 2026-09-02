@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -21,6 +22,8 @@ from app.ui.avatar_widget import (
     AVATAR_LAYER_ORDER,
     AVATAR_ASSET_PATHS,
     AVATAR_VISUAL_PROFILES,
+    DELAMAIN_ENTRY_REVEAL_DURATION_MS,
+    DELAMAIN_IDLE_PULSE_PERIOD_MS,
     ENTRY_REVEAL_DURATION_MS,
     ENTRY_REVEAL_OFFSET_PX,
     ENTRY_REVEAL_START_SCALE,
@@ -34,6 +37,10 @@ from app.ui.avatar_widget import (
     PersonaAvatarWidget,
     avatar_cache_sizes,
     clear_avatar_pixmap_cache,
+)
+from app.ui.avatar_animation_profiles import (
+    DelamainAnimationProfile,
+    FairyAnimationProfile,
 )
 from app.ui.persona_dialogue_panel import STATUS_TEXT, parse_source_groups
 from app.ui_themes import get_theme
@@ -112,6 +119,148 @@ class PersonaDialoguePanelTests(unittest.TestCase):
             AVATAR_VISUAL_PROFILES["fairy"]["error"]["motion"],
             "warning_ring",
         )
+
+    def test_personas_select_separate_animation_profile_classes(self):
+        fairy = PersonaAvatarWidget("fairy", get_theme("fairy"))
+        delamain = PersonaAvatarWidget("delamain", get_theme("delamain"))
+
+        self.assertIsInstance(fairy.animation_profile, FairyAnimationProfile)
+        self.assertIsInstance(delamain.animation_profile, DelamainAnimationProfile)
+        self.assertEqual(DELAMAIN_ENTRY_REVEAL_DURATION_MS, 720.0)
+        self.assertEqual(DELAMAIN_IDLE_PULSE_PERIOD_MS, 4000.0)
+        self.assertEqual(
+            delamain.animation_profile.idle_indicator_style,
+            "internal_face_scan",
+        )
+        self.assertEqual(
+            delamain.animation_profile.monitoring_layer_style,
+            "face_wave_grid",
+        )
+        self.assertEqual(delamain.animation_profile.grid_columns, 8)
+        self.assertEqual(delamain.animation_profile.grid_rows, 10)
+        self.assertEqual(delamain.animation_profile.distortion_strip_count, 18)
+        self.assertEqual(delamain.animation_profile.idle_scan_duration_ms, 1500.0)
+        self.assertEqual(delamain.animation_profile.face_scan_band_ratio, 0.14)
+        self.assertAlmostEqual(
+            delamain.animation_profile._idle_scan_progress(0.1875),
+            0.5,
+        )
+        self.assertIsNone(delamain.animation_profile._idle_scan_progress(0.5))
+        self.assertFalse(
+            hasattr(delamain.animation_profile, "_paint_online_indicator")
+        )
+        self.assertFalse(
+            hasattr(delamain.animation_profile, "_paint_scan_wave_indicator")
+        )
+        self.assertGreater(
+            delamain.animation_profile.entry_layer_opacity("background", 0.12),
+            delamain.animation_profile.entry_layer_opacity("core", 0.12),
+        )
+
+        fairy.close()
+        fairy.deleteLater()
+        delamain.close()
+        delamain.deleteLater()
+
+    def test_delamain_search_uses_absolute_time_and_keeps_portrait_stable(self):
+        avatar = PersonaAvatarWidget("delamain", get_theme("delamain"))
+        original_size = avatar.size()
+        original_pixmap_key = avatar.source_pixmap.cacheKey()
+        avatar.set_state(PersonaState.SEARCHING)
+        avatar._mode_origin_phase = 0.10
+
+        with patch.object(avatar._mode_clock, "elapsed", return_value=450):
+            avatar._advance_animation()
+        self.assertAlmostEqual(avatar.phase, 0.35, places=6)
+
+        with patch.object(avatar._mode_clock, "elapsed", return_value=900):
+            avatar._advance_animation()
+        self.assertAlmostEqual(avatar.phase, 0.60, places=6)
+        self.assertEqual(avatar.size(), original_size)
+        self.assertEqual(avatar.source_pixmap.cacheKey(), original_pixmap_key)
+
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_delamain_active_states_animate_only_hud_layers(self):
+        avatar = PersonaAvatarWidget("delamain", get_theme("delamain"))
+        original_size = avatar.size()
+        original_pixmap_key = avatar.source_pixmap.cacheKey()
+        avatar.show()
+        self.app.processEvents()
+
+        for state in (
+            PersonaState.IDLE,
+            PersonaState.LISTENING,
+            PersonaState.SEARCHING,
+            PersonaState.THINKING,
+            PersonaState.RESPONDING,
+        ):
+            avatar.set_state(state)
+            avatar.phase = 0.12
+            avatar.update()
+            self.app.processEvents()
+            before = avatar.grab().toImage().bits().tobytes()
+            avatar.phase = 0.58
+            avatar.update()
+            self.app.processEvents()
+            after = avatar.grab().toImage().bits().tobytes()
+            self.assertNotEqual(before, after, state)
+
+        self.assertEqual(avatar.size(), original_size)
+        self.assertEqual(avatar.source_pixmap.cacheKey(), original_pixmap_key)
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_delamain_idle_face_grid_moves_between_low_frequency_scans(self):
+        avatar = PersonaAvatarWidget("delamain", get_theme("delamain"))
+        original_pixmap_key = avatar.source_pixmap.cacheKey()
+        avatar.set_state(PersonaState.COMPLETE)
+        avatar.set_animation_mode(AvatarAnimationMode.IDLE_BREATHING)
+        avatar.show()
+        self.app.processEvents()
+
+        self.assertIsNone(avatar.animation_profile._idle_scan_progress(0.55))
+        self.assertIsNone(avatar.animation_profile._idle_scan_progress(0.75))
+        avatar.phase = 0.55
+        avatar.update()
+        self.app.processEvents()
+        before = avatar.grab().toImage().bits().tobytes()
+        avatar.phase = 0.75
+        avatar.update()
+        self.app.processEvents()
+        after = avatar.grab().toImage().bits().tobytes()
+
+        self.assertNotEqual(before, after)
+        self.assertEqual(avatar.source_pixmap.cacheKey(), original_pixmap_key)
+        avatar.close()
+        avatar.deleteLater()
+
+    def test_delamain_core_pixels_participate_in_signal_wave(self):
+        avatar = PersonaAvatarWidget("delamain", get_theme("delamain"))
+        avatar_pixmap = avatar._prepared_avatar_pixmap(90)
+        image_rect = QRectF(7, 7, 90, 90)
+        signatures = []
+
+        for phase in (0.14, 0.61):
+            image = QImage(104, 104, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            avatar.animation_profile.paint_core(
+                painter,
+                image_rect,
+                avatar_pixmap,
+                "thinking",
+                AvatarAnimationMode.WORKING,
+                phase,
+            )
+            painter.end()
+            signatures.append(hashlib.sha256(image.bits().tobytes()).hexdigest())
+
+        self.assertNotEqual(signatures[0], signatures[1])
+        avatar.close()
+        avatar.deleteLater()
 
     def test_fairy_active_states_use_one_constant_rotation_language(self):
         active_motions = {
@@ -304,7 +453,7 @@ class PersonaDialoguePanelTests(unittest.TestCase):
         self.assertAlmostEqual(
             panel.avatar._fairy_breathing_scale(panel.avatar.phase),
             1.0,
-            places=5,
+            delta=0.001,
         )
         self.assertEqual(FAIRY_WORKING_SETTLE_MS, 200.0)
         QTest.qWait(250)

@@ -17,6 +17,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from .avatar_animation_profiles import (
+    DelamainAnimationProfile,
+    get_persona_animation_profile,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +55,8 @@ FAIRY_WORKING_SETTLE_MS = 200.0
 ENTRY_REVEAL_DURATION_MS = 550.0
 ENTRY_REVEAL_START_SCALE = 0.94
 ENTRY_REVEAL_OFFSET_PX = 6.0
+DELAMAIN_ENTRY_REVEAL_DURATION_MS = DelamainAnimationProfile.entry_duration_ms
+DELAMAIN_IDLE_PULSE_PERIOD_MS = DelamainAnimationProfile.idle_period_ms
 AVATAR_LAYER_ORDER = ("background", "core", "foreground")
 
 
@@ -127,6 +134,7 @@ class PersonaAvatarWidget(QWidget):
     ):
         super().__init__(parent)
         self.persona_id = "neutral"
+        self.animation_profile = get_persona_animation_profile(self.persona_id)
         self.theme = dict(theme)
         self.state = "idle"
         self.phase = 0.0
@@ -173,6 +181,7 @@ class PersonaAvatarWidget(QWidget):
     def set_persona(self, persona_id, theme=None):
         """Change a reusable current-persona widget without affecting history."""
         self.persona_id = str(persona_id).strip().casefold() or "neutral"
+        self.animation_profile = get_persona_animation_profile(self.persona_id)
 
         if theme is not None:
             self.theme = dict(theme)
@@ -291,7 +300,7 @@ class PersonaAvatarWidget(QWidget):
         self.animation_mode = normalized_mode
 
         if normalized_mode is AvatarAnimationMode.IDLE_BREATHING:
-            self.phase = FAIRY_BREATHING_START_PHASE
+            self.phase = self.animation_profile.idle_start_phase
         else:
             self.phase = 0.0
 
@@ -407,7 +416,10 @@ class PersonaAvatarWidget(QWidget):
     def _advance_animation(self):
         if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
             elapsed_ms = max(0, self._entry_clock.elapsed())
-            self.phase = min(1.0, elapsed_ms / ENTRY_REVEAL_DURATION_MS)
+            self.phase = min(
+                1.0,
+                elapsed_ms / self.animation_profile.entry_duration_ms,
+            )
 
             if self.phase >= 1.0:
                 self._finish_entry_reveal()
@@ -435,12 +447,15 @@ class PersonaAvatarWidget(QWidget):
             self.update()
             return
 
-        if self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
-            elapsed_ms = max(0, self._mode_clock.elapsed())
-            self.phase = (
-                self._mode_origin_phase
-                + elapsed_ms / FAIRY_BREATHING_PERIOD_MS
-            ) % 1.0
+        profile_phase = self.animation_profile.phase_for_elapsed(
+            self.state,
+            self.animation_mode,
+            self._mode_clock.elapsed(),
+            self._mode_origin_phase,
+        )
+
+        if profile_phase is not None:
+            self.phase = profile_phase
             self.update()
             return
 
@@ -462,7 +477,7 @@ class PersonaAvatarWidget(QWidget):
         self.animation_mode = target_mode
 
         if target_mode is AvatarAnimationMode.IDLE_BREATHING:
-            self.phase = FAIRY_BREATHING_START_PHASE
+            self.phase = self.animation_profile.idle_start_phase
         elif target_mode is AvatarAnimationMode.WORKING:
             self.phase = entry_exit_phase
         else:
@@ -478,7 +493,14 @@ class PersonaAvatarWidget(QWidget):
         if self.animation_mode is not AvatarAnimationMode.ENTRY_REVEAL:
             return 1.0
 
-        return min(1.0, max(0.0, self._entry_clock.elapsed() / ENTRY_REVEAL_DURATION_MS))
+        return min(
+            1.0,
+            max(
+                0.0,
+                self._entry_clock.elapsed()
+                / self.animation_profile.entry_duration_ms,
+            ),
+        )
 
     def _update_fairy_phase_from_clock(self):
         elapsed_ms = max(0, self._mode_clock.elapsed())
@@ -628,16 +650,20 @@ class PersonaAvatarWidget(QWidget):
         painter.save()
 
         if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
-            entry_scale = ENTRY_REVEAL_START_SCALE + (
-                1.0 - ENTRY_REVEAL_START_SCALE
+            entry_scale = self.animation_profile.entry_start_scale + (
+                1.0 - self.animation_profile.entry_start_scale
             ) * entry_ease
             center = QRectF(self.rect()).center()
-            painter.setOpacity(entry_ease)
-            painter.translate(0.0, ENTRY_REVEAL_OFFSET_PX * (1.0 - entry_ease))
+            painter.translate(
+                0.0,
+                self.animation_profile.entry_offset_px * (1.0 - entry_ease),
+            )
             painter.translate(center)
             painter.scale(entry_scale, entry_scale)
             painter.translate(-center)
-            glow_strength *= 0.60 + 0.40 * entry_ease
+            glow_strength *= self.animation_profile.entry_glow_factor(
+                entry_progress
+            )
 
         if (
             self.persona_id == "fairy"
@@ -652,7 +678,10 @@ class PersonaAvatarWidget(QWidget):
                 expansion,
             )
             glow_strength *= 0.80 + breathing_wave * 0.20
-        elif self.animation_mode is AvatarAnimationMode.IDLE_BREATHING:
+        elif (
+            self.animation_mode is AvatarAnimationMode.IDLE_BREATHING
+            and self.persona_id != "delamain"
+        ):
             glow_strength *= 0.84 + breathing_wave * 0.16
         elif self.persona_id == "fairy" and self._settling_to_static:
             settle_scale = self._static_settle_scale()
@@ -664,13 +693,23 @@ class PersonaAvatarWidget(QWidget):
                 expansion,
             )
 
-        if motion == "ambient_breathe":
-            glow_strength *= 0.78 + wave * 0.22
-        elif motion == "response_pulse":
-            glow_strength *= 0.72 + wave * 0.42
-        elif motion == "listening_hud":
-            glow_strength *= 0.88 + wave * 0.18
+        if self.persona_id != "delamain":
+            if motion == "ambient_breathe":
+                glow_strength *= 0.78 + wave * 0.22
+            elif motion == "response_pulse":
+                glow_strength *= 0.72 + wave * 0.42
+            elif motion == "listening_hud":
+                glow_strength *= 0.88 + wave * 0.18
 
+        glow_strength = self.animation_profile.adjust_glow(
+            self.state,
+            self.animation_mode,
+            self.phase,
+            glow_strength,
+        )
+
+        painter.save()
+        painter.setOpacity(self._entry_layer_opacity("background", entry_progress))
         self._paint_avatar_background(
             painter,
             image_rect,
@@ -679,12 +718,7 @@ class PersonaAvatarWidget(QWidget):
             entry_progress,
         )
         self._paint_glow(painter, image_rect, border_color, glow_strength)
-
-        if self.persona_id == "delamain":
-            surround = QColor(self.theme.get("page", "#07111c"))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(surround)
-            painter.drawRoundedRect(image_rect.adjusted(-2, -2, 2, 2), 8, 8)
+        painter.restore()
 
         prepared_width = base_image_rect.width()
 
@@ -692,7 +726,20 @@ class PersonaAvatarWidget(QWidget):
             prepared_width *= FAIRY_BREATHING_MAX_SCALE
 
         avatar_pixmap = self._prepared_avatar_pixmap(round(prepared_width))
-        painter.drawPixmap(image_rect.toRect(), avatar_pixmap)
+        painter.save()
+        painter.setOpacity(self._entry_layer_opacity("core", entry_progress))
+        self.animation_profile.paint_core(
+            painter,
+            image_rect,
+            avatar_pixmap,
+            self.state,
+            self.animation_mode,
+            self.phase,
+        )
+        painter.restore()
+
+        painter.save()
+        painter.setOpacity(self._entry_layer_opacity("foreground", entry_progress))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(border_color, float(profile["border"])))
 
@@ -701,20 +748,18 @@ class PersonaAvatarWidget(QWidget):
         else:
             painter.drawRoundedRect(image_rect, 7, 7)
 
-        if motion == "listening_hud":
-            self._paint_delamain_listening_hud(
-                painter,
-                image_rect,
-                border_color,
-                wave,
-            )
-        elif motion == "vertical_scan":
-            self._paint_delamain_scan(painter, image_rect, border_color)
-        elif motion == "hud_cycle":
-            self._paint_delamain_thinking_hud(painter, image_rect, border_color)
-        elif motion == "response_pulse" and self.persona_id == "delamain":
-            self._paint_delamain_response(painter, image_rect, border_color, wave)
-        elif motion == "core_rotation" and self.animation_mode in {
+        state_overlay_painted = self.animation_profile.paint_state_overlay(
+            painter,
+            image_rect,
+            border_color,
+            self.theme,
+            self.state,
+            self.animation_mode,
+            self.phase,
+            entry_progress,
+        )
+
+        if not state_overlay_painted and motion == "core_rotation" and self.animation_mode in {
             AvatarAnimationMode.ENTRY_REVEAL,
             AvatarAnimationMode.WORKING,
         }:
@@ -748,6 +793,12 @@ class PersonaAvatarWidget(QWidget):
             self._paint_warning_overlay(painter, image_rect, border_color)
 
         painter.restore()
+        painter.restore()
+
+    def _entry_layer_opacity(self, layer, entry_progress):
+        if self.animation_mode is not AvatarAnimationMode.ENTRY_REVEAL:
+            return 1.0
+        return self.animation_profile.entry_layer_opacity(layer, entry_progress)
 
     def _paint_avatar_background(
         self,
@@ -788,30 +839,17 @@ class PersonaAvatarWidget(QWidget):
                 ]
             )
             painter.drawPolygon(polygon)
-            return
 
-        if self.persona_id == "delamain":
-            hud_color = QColor(color)
-            hud_color.setAlpha(48)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(hud_color, 1.0))
-            painter.drawRoundedRect(image_rect.adjusted(-5, -4, 5, 4), 10, 10)
-            painter.drawLine(
-                QLineF(
-                    image_rect.left() - 8,
-                    center.y(),
-                    image_rect.left() - 3,
-                    center.y(),
-                )
-            )
-            painter.drawLine(
-                QLineF(
-                    image_rect.right() + 3,
-                    center.y(),
-                    image_rect.right() + 8,
-                    center.y(),
-                )
-            )
+        self.animation_profile.paint_background(
+            painter,
+            image_rect,
+            color,
+            self.theme,
+            self.state,
+            self.animation_mode,
+            self.phase,
+            entry_progress,
+        )
 
     def _paint_avatar_foreground(self, painter, image_rect, color, entry_progress):
         """Paint crisp ring/frame accents above the persona image."""
@@ -845,19 +883,17 @@ class PersonaAvatarWidget(QWidget):
                 1.7,
                 1.7,
             )
-        elif self.persona_id == "delamain":
-            painter.setPen(QPen(accent, 1.35))
-            length = image_rect.width() * 0.12
-            offset = 4.0
-            left = image_rect.left() - offset
-            right = image_rect.right() + offset
-            top = image_rect.top() - offset
-            bottom = image_rect.bottom() + offset
 
-            for x, direction_x in ((left, 1), (right, -1)):
-                for y, direction_y in ((top, 1), (bottom, -1)):
-                    painter.drawLine(QLineF(x, y, x + length * direction_x, y))
-                    painter.drawLine(QLineF(x, y, x, y + length * direction_y))
+        self.animation_profile.paint_foreground(
+            painter,
+            image_rect,
+            color,
+            self.theme,
+            self.state,
+            self.animation_mode,
+            self.phase,
+            entry_progress,
+        )
 
         if self.animation_mode is AvatarAnimationMode.ENTRY_REVEAL:
             sweep = QColor(accent)
@@ -870,11 +906,6 @@ class PersonaAvatarWidget(QWidget):
                     sweep_rect,
                     round((90 - entry_progress * 300) * 16),
                     round(48 * 16),
-                )
-            elif self.persona_id == "delamain":
-                sweep_y = image_rect.top() + image_rect.height() * entry_progress
-                painter.drawLine(
-                    QLineF(image_rect.left() - 3, sweep_y, image_rect.right() + 3, sweep_y)
                 )
 
     def _layer_rotation_phase(self, entry_progress):
@@ -906,119 +937,6 @@ class PersonaAvatarWidget(QWidget):
                 painter.drawEllipse(glow_rect)
             else:
                 painter.drawRoundedRect(glow_rect, 8 + expansion, 8 + expansion)
-
-    def _paint_delamain_scan(self, painter, image_rect, color):
-        painter.save()
-        clip_path = QPainterPath()
-        clip_path.addRoundedRect(image_rect, 7, 7)
-        painter.setClipPath(clip_path)
-        scan_y = image_rect.top() + image_rect.height() * self.phase
-        band_color = QColor(color)
-        band_color.setAlpha(34)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(band_color)
-        painter.drawRect(
-            QRectF(
-                image_rect.left(),
-                scan_y - max(3.0, image_rect.height() * 0.045),
-                image_rect.width(),
-                max(6.0, image_rect.height() * 0.09),
-            )
-        )
-        scan_color = QColor(color)
-        scan_color.setAlpha(205)
-        painter.setPen(QPen(scan_color, 1.4, Qt.PenStyle.SolidLine))
-        painter.drawLine(QLineF(image_rect.left(), scan_y, image_rect.right(), scan_y))
-        painter.restore()
-
-        marker_color = QColor(color)
-        marker_color.setAlpha(220)
-        painter.setPen(QPen(marker_color, 1.6))
-        marker_half = max(3.0, image_rect.height() * 0.045)
-        for marker_x in (image_rect.left() - 3, image_rect.right() + 3):
-            painter.drawLine(
-                QLineF(marker_x, scan_y - marker_half, marker_x, scan_y + marker_half)
-            )
-
-    def _paint_delamain_listening_hud(self, painter, image_rect, color, wave):
-        hud_color = QColor(color)
-        hud_color.setAlpha(round(170 + 70 * wave))
-        painter.setPen(QPen(hud_color, 2.0))
-        length = image_rect.width() * 0.18
-        offset = 3.0
-        left = image_rect.left() - offset
-        right = image_rect.right() + offset
-        top = image_rect.top() - offset
-        bottom = image_rect.bottom() + offset
-        for x, x_direction in ((left, 1), (right, -1)):
-            for y, y_direction in ((top, 1), (bottom, -1)):
-                painter.drawLine(QLineF(x, y, x + length * x_direction, y))
-                painter.drawLine(QLineF(x, y, x, y + length * y_direction))
-
-        painter.setPen(QPen(hud_color, 1.2))
-        side_length = image_rect.height() * (0.12 + 0.04 * wave)
-        center_y = image_rect.center().y()
-        painter.drawLine(
-            QLineF(left - 2, center_y - side_length, left - 2, center_y + side_length)
-        )
-        painter.drawLine(
-            QLineF(right + 2, center_y - side_length, right + 2, center_y + side_length)
-        )
-
-    def _paint_delamain_thinking_hud(self, painter, image_rect, color):
-        segment_length = image_rect.width() * 0.25
-        inset = 2.5
-        sides = (
-            QLineF(image_rect.left() + inset, image_rect.top() - inset,
-                   image_rect.left() + inset + segment_length, image_rect.top() - inset),
-            QLineF(image_rect.right() + inset, image_rect.top() + inset,
-                   image_rect.right() + inset, image_rect.top() + inset + segment_length),
-            QLineF(image_rect.right() - inset, image_rect.bottom() + inset,
-                   image_rect.right() - inset - segment_length, image_rect.bottom() + inset),
-            QLineF(image_rect.left() - inset, image_rect.bottom() - inset,
-                   image_rect.left() - inset, image_rect.bottom() - inset - segment_length),
-        )
-        active_side = int(self.phase * len(sides)) % len(sides)
-
-        for index, line in enumerate(sides):
-            distance = (index - active_side) % len(sides)
-            hud_color = QColor(color)
-            hud_color.setAlpha(max(60, 235 - distance * 52))
-            painter.setPen(QPen(hud_color, 2.2 if distance == 0 else 1.4))
-            painter.drawLine(line)
-
-        center = image_rect.center()
-        indicator = QColor(color)
-        indicator.setAlpha(210)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(indicator)
-        angle = self.phase * math.tau
-        marker_radius = image_rect.width() * 0.42
-        painter.drawEllipse(
-            QPointF(
-                center.x() + math.cos(angle) * marker_radius,
-                center.y() + math.sin(angle) * marker_radius,
-            ),
-            1.8,
-            1.8,
-        )
-
-    def _paint_delamain_response(self, painter, image_rect, color, wave):
-        response_color = QColor(color)
-        response_color.setAlpha(round(145 + 90 * wave))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(response_color, 1.2 + wave * 1.2))
-        painter.drawRoundedRect(image_rect.adjusted(-3, -3, 3, 3), 9, 9)
-        bar_width = image_rect.width() * (0.28 + 0.18 * wave)
-        bar_y = image_rect.bottom() + 5
-        painter.drawLine(
-            QLineF(
-                image_rect.center().x() - bar_width / 2,
-                bar_y,
-                image_rect.center().x() + bar_width / 2,
-                bar_y,
-            )
-        )
 
     def _paint_fairy_core_rotation(
         self,

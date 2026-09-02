@@ -464,7 +464,7 @@ class GuiSmokeTests(unittest.TestCase):
             panel.avatar.entry_target_mode,
             AvatarAnimationMode.IDLE_BREATHING,
         )
-        QTest.qWait(600)
+        QTest.qWait(780)
         self.assertEqual(
             panel.avatar.animation_mode,
             AvatarAnimationMode.IDLE_BREATHING,
@@ -482,6 +482,51 @@ class GuiSmokeTests(unittest.TestCase):
             AvatarAnimationMode.HISTORY_STATIC,
         )
         self.assertFalse(panel.avatar.animation_timer.isActive())
+
+    def test_multiple_delamain_answers_keep_one_active_timer(self):
+        self.window._retire_latest_idle_avatar_panel()
+        self.window.active_persona = get_persona("delamain")
+        self.window._update_persona_display()
+        self.window.show()
+        completed_panels = []
+
+        def finish_immediately(operation, message, **callbacks):
+            del operation, message
+            callbacks["on_state"]("thinking")
+            callbacks["on_token"]("System response")
+            callbacks["on_success"](None)
+            callbacks["on_finished"]()
+
+        with patch.object(
+            self.window,
+            "_run_worker",
+            side_effect=finish_immediately,
+        ):
+            for question_number in range(4):
+                self.window.message_input.setPlainText(
+                    f"System request {question_number + 1}"
+                )
+                self.window.send_message()
+                self.app.processEvents()
+                completed_panels.append(self.window.current_ai_panel)
+                animated = [
+                    panel
+                    for panel in completed_panels
+                    if panel.avatar.animation_timer.isActive()
+                ]
+                self.assertEqual(animated, [self.window.current_ai_panel])
+
+        for historical_panel in completed_panels[:-1]:
+            self.assertEqual(
+                historical_panel.avatar.animation_mode,
+                AvatarAnimationMode.HISTORY_STATIC,
+            )
+            self.assertFalse(historical_panel.avatar.animation_timer.isActive())
+
+        self.assertEqual(
+            completed_panels[-1].avatar.entry_target_mode,
+            AvatarAnimationMode.IDLE_BREATHING,
+        )
 
     def test_avatar_remains_square_when_window_is_resized(self):
         self.window.show()
