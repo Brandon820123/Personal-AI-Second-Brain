@@ -39,14 +39,17 @@ try:
         stream_knowledge_chat,
         stream_normal_chat,
     )
+    from .cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
     from .knowledge_library import delete_document, list_documents
     from .language_preferences import get_language_preference, infer_response_language
     from .personas import get_active_persona, list_personas, switch_persona
+    from .supabase_client import create_supabase_client
     from .ui import (
         AvatarAnimationMode,
         PersonaAvatarWidget,
         PersonaDialoguePanel,
         PersonaState,
+        clear_avatar_pixmap_cache,
     )
     from .ui_themes import build_stylesheet, get_theme
     from .voice.audio_player import LocalAudioPlayer
@@ -68,14 +71,17 @@ except ImportError:
         stream_knowledge_chat,
         stream_normal_chat,
     )
+    from cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
     from knowledge_library import delete_document, list_documents
     from language_preferences import get_language_preference, infer_response_language
     from personas import get_active_persona, list_personas, switch_persona
+    from supabase_client import create_supabase_client
     from ui import (
         AvatarAnimationMode,
         PersonaAvatarWidget,
         PersonaDialoguePanel,
         PersonaState,
+        clear_avatar_pixmap_cache,
     )
     from ui_themes import build_stylesheet, get_theme
     from voice.audio_player import LocalAudioPlayer
@@ -296,6 +302,7 @@ class MainWindow(QMainWindow):
         self._voice_warning_session = None
         self._updating_voice_controls = False
         self.chat_busy = False
+        self.cloud_sync_busy = False
         self.voice_transcribing = False
         self.speech_queue_bridge = SpeechQueueBridge(self)
         self.speech_queue_bridge.activity_changed.connect(
@@ -313,6 +320,7 @@ class MainWindow(QMainWindow):
         self._sync_voice_controls()
         self._update_persona_display(add_greeting=True)
         self.refresh_library()
+        self._sync_cloud_files()
         self._run_health_check()
 
         if self.voice_settings["enabled"]:
@@ -515,7 +523,9 @@ class MainWindow(QMainWindow):
 
         title = QLabel("知识库")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("所有文档、Embedding 和 ChromaDB 数据均保留在本机。")
+        subtitle = QLabel(
+            "云端文件先同步到本地缓存；Embedding 和 ChromaDB 数据仍保留在本机。"
+        )
         subtitle.setObjectName("mutedLabel")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -525,23 +535,31 @@ class MainWindow(QMainWindow):
         self.delete_button = QPushButton("删除文档")
         self.reindex_button = QPushButton("重新索引")
         self.refresh_button = QPushButton("刷新")
+        self.cloud_refresh_button = QPushButton("刷新云文件")
         self.import_button.setObjectName("primaryButton")
 
         self.import_button.clicked.connect(self.choose_import_file)
         self.delete_button.clicked.connect(self.delete_selected_document)
         self.reindex_button.clicked.connect(self.reindex_selected_document)
         self.refresh_button.clicked.connect(self.refresh_library)
+        self.cloud_refresh_button.clicked.connect(self._sync_cloud_files)
 
         for button in (
             self.import_button,
             self.delete_button,
             self.reindex_button,
             self.refresh_button,
+            self.cloud_refresh_button,
         ):
             buttons.addWidget(button)
 
         buttons.addStretch()
         layout.addLayout(buttons)
+
+        self.cloud_status = QLabel("")
+        self.cloud_status.setObjectName("mutedLabel")
+        self.cloud_status.setWordWrap(True)
+        layout.addWidget(self.cloud_status)
 
         self.knowledge_table = QTableWidget(0, 5)
         self.knowledge_table.setHorizontalHeaderLabels(
@@ -1626,11 +1644,64 @@ class MainWindow(QMainWindow):
             f"{sum(document['chunk_count'] for document in self.documents)} 个 Chunk。"
         )
 
+    def _sync_cloud_files(self):
+        if self.cloud_sync_busy:
+            return
+
+        self.cloud_sync_busy = True
+        self.cloud_refresh_button.setDisabled(True)
+        self.cloud_status.setText("正在检查 Supabase Storage…")
+        cloud_client = create_supabase_client(required=False)
+
+        if cloud_client is None:
+            self._cloud_sync_succeeded(sync_cloud_cache())
+            self._cloud_sync_finished()
+            return
+
+        self._run_worker(
+            sync_cloud_cache,
+            cloud_client,
+            on_success=self._cloud_sync_succeeded,
+            on_error=self._cloud_sync_failed,
+            on_finished=self._cloud_sync_finished,
+        )
+
+    def _cloud_sync_succeeded(self, result):
+        if result.warning:
+            self.cloud_status.setText(
+                f"{result.warning} 已发现 {result.cached_count} 个缓存文件。"
+            )
+            return
+
+        self.cloud_status.setText(
+            f"云文件已同步：下载 {result.downloaded_count} 个，"
+            f"本地缓存共 {result.cached_count} 个。"
+        )
+
+        if any("avatars" in Path(path).parts for path in result.downloaded):
+            clear_avatar_pixmap_cache()
+
+            for avatar in self.findChildren(PersonaAvatarWidget):
+                avatar.reload_cached_asset(force=True)
+
+    def _cloud_sync_failed(self, message):
+        self.cloud_status.setText(
+            f"Cloud storage unavailable. Using local cache. {message}"
+        )
+
+    def _cloud_sync_finished(self):
+        self.cloud_sync_busy = False
+        self.cloud_refresh_button.setDisabled(False)
+
     def choose_import_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "导入本地文档",
-            str(Path.home()),
+            str(
+                DEFAULT_CACHE_ROOT / "documents"
+                if (DEFAULT_CACHE_ROOT / "documents").is_dir()
+                else Path.home()
+            ),
             DOCUMENT_FILTER,
         )
 
@@ -1719,6 +1790,7 @@ class MainWindow(QMainWindow):
             self.delete_button,
             self.reindex_button,
             self.refresh_button,
+            self.cloud_refresh_button,
         ):
             button.setDisabled(busy)
 

@@ -84,6 +84,27 @@ Ollama token stream
 - Voice input, STT, TTS, temporary audio, and playback remain on-device. There is
   no wake word, background listening, voice cloning, or cloud speech service.
 
+## Phase 7A: Supabase Storage Cache
+
+AI file resources can optionally be synchronized from the Supabase Storage bucket
+`ai-files`. The supported bucket layout is `documents/`, `avatars/`, and `config/`.
+Every object is downloaded to the matching location below `data/cache/` before it
+is used; document chunking, embeddings, ChromaDB, RAG, Ollama, and chat remain
+unchanged and local.
+
+Set `SUPABASE_URL` and `SUPABASE_KEY` in the process environment (see
+`.env.example`). Secrets are never stored in application source. At startup, and
+when **刷新云文件** is selected, a Qt background worker compares Storage metadata
+with `data/cache/.cloud_manifest.json` and downloads only missing or updated
+objects. Cached documents are ordinary local paths accepted by the existing
+document importer. Cached avatar files take precedence over bundled
+`assets/avatars/` files without changing avatar animation behavior.
+
+If configuration or network access is unavailable, the application displays
+`Cloud storage unavailable. Using local cache.` and keeps using any existing
+cached and bundled files. Synchronization never deletes an unlisted local cache
+file automatically, so a temporary cloud outage cannot remove offline resources.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

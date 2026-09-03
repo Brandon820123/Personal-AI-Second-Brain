@@ -22,6 +22,11 @@ from .avatar_animation_profiles import (
     get_persona_animation_profile,
 )
 
+try:
+    from ..cloud_storage import cached_avatar_path
+except ImportError:
+    from cloud_storage import cached_avatar_path
+
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +35,17 @@ AVATAR_ASSET_PATHS = {
     "delamain": AVATAR_DIRECTORY / "delamain.png",
     "fairy": AVATAR_DIRECTORY / "fairy.png",
 }
+
+
+def resolve_avatar_asset_path(persona_id):
+    """Prefer a synchronized cloud avatar while retaining bundled fallbacks."""
+
+    bundled_path = AVATAR_ASSET_PATHS.get(str(persona_id).strip().casefold())
+
+    if bundled_path is None:
+        return None
+
+    return cached_avatar_path(bundled_path.name) or bundled_path
 
 CONTINUOUS_ANIMATION_STATES = {
     "idle",
@@ -143,6 +159,7 @@ class PersonaAvatarWidget(QWidget):
         self.asset_warning = ""
         self.source_pixmap = QPixmap()
         self._animation_enabled = bool(animation_enabled)
+        self._uses_default_asset_paths = asset_paths is None
         self._asset_paths = dict(AVATAR_ASSET_PATHS)
         self._frame_clock = QElapsedTimer()
         self._mode_clock = QElapsedTimer()
@@ -186,7 +203,10 @@ class PersonaAvatarWidget(QWidget):
         if theme is not None:
             self.theme = dict(theme)
 
-        self.asset_path = self._asset_paths.get(self.persona_id)
+        if self._uses_default_asset_paths:
+            self.asset_path = resolve_avatar_asset_path(self.persona_id)
+        else:
+            self.asset_path = self._asset_paths.get(self.persona_id)
         self.asset_warning = ""
         self.source_pixmap = QPixmap()
 
@@ -215,6 +235,27 @@ class PersonaAvatarWidget(QWidget):
         self._mode_clock.restart()
         self._sync_animation_timer()
         self.update()
+
+    def reload_cached_asset(self, force=False):
+        """Reload only the image source, preserving state and animation clocks."""
+
+        if not self._uses_default_asset_paths:
+            return False
+
+        refreshed_path = resolve_avatar_asset_path(self.persona_id)
+
+        if refreshed_path == self.asset_path and not force:
+            return False
+
+        self.asset_path = refreshed_path
+        self.asset_warning = ""
+        self.source_pixmap = QPixmap()
+
+        if self.asset_path is not None:
+            self.source_pixmap = self._load_source_pixmap(self.asset_path)
+
+        self.update()
+        return True
 
     def set_state(self, state, preserve_animation_mode=False):
         """Update effects while preserving animation continuity between states."""
