@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from pypdf import PdfWriter
@@ -79,6 +80,29 @@ class DocumentLoaderTests(unittest.TestCase):
 
         self.assertEqual(load_document(document), "# Heading\n\nMarkdown text.")
 
+    def test_extracts_docx_paragraphs_without_office_or_cloud_services(self):
+        document = self.directory / "lesson.docx"
+        document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Calculus introduction.</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Limits and derivatives.</w:t></w:r></w:p>
+  </w:body>
+</w:document>"""
+
+        with zipfile.ZipFile(document, "w") as archive:
+            archive.writestr("word/document.xml", document_xml)
+
+        self.assertEqual(
+            load_document_pages(document),
+            [
+                {
+                    "text": "Calculus introduction.\n\nLimits and derivatives.",
+                    "page_number": None,
+                }
+            ],
+        )
+
     def test_extracts_pdf_text_with_page_numbers(self):
         document = self.directory / "physics.pdf"
         write_pdf(
@@ -125,7 +149,7 @@ class DocumentLoaderTests(unittest.TestCase):
             load_document(missing_document)
 
     def test_rejects_unsupported_extension(self):
-        document = self.directory / "notes.docx"
+        document = self.directory / "notes.rtf"
         document.write_text("Not supported.", encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "Unsupported document type"):

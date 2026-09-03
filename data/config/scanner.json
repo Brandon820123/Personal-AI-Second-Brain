@@ -1,0 +1,13 @@
+{
+  "watch_folders": [
+    "D:/Learning_profile"
+  ],
+  "ignored_folders": [
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "venv",
+    ".venv",
+    ".env"
+  ]
+}

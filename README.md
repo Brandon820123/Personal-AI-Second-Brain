@@ -105,6 +105,38 @@ If configuration or network access is unavailable, the application displays
 cached and bundled files. Synchronization never deletes an unlisted local cache
 file automatically, so a temporary cloud outage cannot remove offline resources.
 
+## Phase 8: Local File Scanner v1
+
+`app/file_scanner.py` provides a local-only discovery layer for configured
+knowledge folders. It recursively finds PDF, DOCX, TXT, and Markdown files,
+prunes development/system folders before traversal, and generates size,
+modification-time, and streaming SHA-256 metadata without loading entire files
+into memory.
+
+Scanner settings live in `data/config/scanner.json`; scan state is persisted
+atomically in `data/config/file_index.json`. Each run classifies supported files
+as new, modified, or unchanged by comparing content hashes. New and modified
+records use `processed: false`, while unchanged records preserve their existing
+processing flag for a later RAG integration phase. The scanner does not currently
+load, chunk, embed, index, or upload any discovered document.
+
+## Phase 8.5: Automatic Knowledge Synchronization
+
+`app/knowledge_sync.py` connects scanner results to the existing document import
+service without changing document loading, chunking, embeddings, ChromaDB, RAG,
+or Ollama logic. `sync_new_documents()` imports new files, safely re-indexes
+modified files, skips unchanged processed files, and retries unchanged files that
+previously failed while still carrying `processed: false`.
+
+Every file is isolated as one synchronization operation. A failure is recorded in
+`last_error` and does not stop later documents. A successful operation atomically
+updates `file_index.json` with `processed: true`, the knowledge library
+`knowledge_id`, and a UTC `last_indexed` timestamp. Existing manually imported
+documents are matched by their resolved source path and remain compatible with
+automatic synchronization. The local document loader also extracts standard DOCX
+paragraph text through WordprocessingML so all Phase 8 scanner formats can enter
+the same existing import pipeline without Office automation or a cloud service.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

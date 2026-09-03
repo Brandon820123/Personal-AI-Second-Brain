@@ -1,15 +1,21 @@
-"""Load text and PDF documents from the local computer."""
+"""Load supported knowledge documents from the local computer."""
 
+import xml.etree.ElementTree as ElementTree
+import zipfile
 from pathlib import Path
 
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 PDF_NO_TEXT_MESSAGE = (
     "This PDF does not contain extractable text. "
     "OCR support is not implemented yet."
+)
+DOCX_NO_TEXT_MESSAGE = "This DOCX does not contain extractable text."
+WORDPROCESSINGML_NAMESPACE = (
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 )
 
 
@@ -58,12 +64,50 @@ def _load_pdf_pages(path):
     return extracted_pages
 
 
+def _load_docx_sections(path):
+    """Extract WordprocessingML paragraphs locally without Office automation."""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml")
+        root = ElementTree.fromstring(document_xml)
+    except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as error:
+        raise ValueError(f"Could not read DOCX '{path}': {error}") from error
+
+    namespace = f"{{{WORDPROCESSINGML_NAMESPACE}}}"
+    paragraphs = []
+
+    for paragraph in root.iter(f"{namespace}p"):
+        fragments = []
+
+        for element in paragraph.iter():
+            if element.tag == f"{namespace}t":
+                fragments.append(element.text or "")
+            elif element.tag == f"{namespace}tab":
+                fragments.append("\t")
+            elif element.tag in (f"{namespace}br", f"{namespace}cr"):
+                fragments.append("\n")
+
+        text = "".join(fragments).strip()
+
+        if text:
+            paragraphs.append(text)
+
+    if not paragraphs:
+        raise ValueError(DOCX_NO_TEXT_MESSAGE)
+
+    return [{"text": "\n\n".join(paragraphs), "page_number": None}]
+
+
 def load_document_pages(file_path):
     """Return document text sections with optional PDF page numbers."""
     path = _validate_document_path(file_path)
 
     if path.suffix.lower() == ".pdf":
         return _load_pdf_pages(path)
+
+    if path.suffix.lower() == ".docx":
+        return _load_docx_sections(path)
 
     try:
         text = path.read_text(encoding="utf-8")
