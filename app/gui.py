@@ -1,7 +1,9 @@
 """PySide6 desktop interface for the local Private Personal AI."""
 
+import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, QObject, QThread, Qt, Signal, Slot
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -41,8 +45,20 @@ try:
     )
     from .cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
     from .knowledge_library import delete_document, list_documents
+    from .knowledge_sync import sync_new_documents
     from .language_preferences import get_language_preference, infer_response_language
     from .personas import get_active_persona, list_personas, switch_persona
+    from .file_scanner import (
+        DEFAULT_CONFIG_PATH as SCANNER_CONFIG_PATH,
+        DEFAULT_INDEX_PATH as FILE_INDEX_PATH,
+        FileScannerError,
+        add_watch_folder,
+        load_file_index,
+        load_scanner_config,
+        remove_watch_folder,
+        scan_folder,
+        set_scan_on_startup,
+    )
     from .supabase_client import create_supabase_client
     from .ui import (
         AvatarAnimationMode,
@@ -73,8 +89,20 @@ except ImportError:
     )
     from cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
     from knowledge_library import delete_document, list_documents
+    from knowledge_sync import sync_new_documents
     from language_preferences import get_language_preference, infer_response_language
     from personas import get_active_persona, list_personas, switch_persona
+    from file_scanner import (
+        DEFAULT_CONFIG_PATH as SCANNER_CONFIG_PATH,
+        DEFAULT_INDEX_PATH as FILE_INDEX_PATH,
+        FileScannerError,
+        add_watch_folder,
+        load_file_index,
+        load_scanner_config,
+        remove_watch_folder,
+        scan_folder,
+        set_scan_on_startup,
+    )
     from supabase_client import create_supabase_client
     from ui import (
         AvatarAnimationMode,
@@ -98,7 +126,62 @@ except ImportError:
 
 
 APP_TITLE = "Private Personal AI"
-DOCUMENT_FILTER = "Documents (*.txt *.md *.pdf)"
+DOCUMENT_FILTER = "Documents (*.txt *.md *.pdf *.docx)"
+
+
+def scan_authorized_sources(
+    on_progress=lambda message: None,
+    config_path=SCANNER_CONFIG_PATH,
+    index_path=FILE_INDEX_PATH,
+):
+    """Scan every authorized source without allowing one root to stop the rest."""
+
+    config = load_scanner_config(config_path)
+    results = []
+    errors = []
+
+    for folder in config["watch_folders"]:
+        on_progress(f"正在扫描：{folder}")
+
+        try:
+            result = scan_folder(
+                folder,
+                index_path=index_path,
+                ignored_folders=config["ignored_folders"],
+            )
+        except Exception as error:
+            errors.append({"path": folder, "error": str(error)})
+            on_progress(f"扫描失败：{Path(folder).name} — {error}")
+            continue
+
+        results.append(result)
+
+        for scan_error in result.get("errors", []):
+            errors.append({"path": folder, "error": scan_error})
+
+    return {
+        "results": results,
+        "errors": errors,
+        "file_count": sum(len(result["files"]) for result in results),
+        "new_count": sum(len(result["new_files"]) for result in results),
+        "modified_count": sum(len(result["modified_files"]) for result in results),
+        "unchanged_count": sum(len(result["unchanged_files"]) for result in results),
+    }
+
+
+def synchronize_authorized_sources(on_progress=lambda message: None):
+    """Adapt knowledge-sync logging to the GUI worker progress callback."""
+
+    return sync_new_documents(log_function=on_progress)
+
+
+def scan_and_synchronize_sources(on_progress=lambda message: None):
+    """Run the common scan-then-sync workflow in one background operation."""
+
+    scan_result = scan_authorized_sources(on_progress=on_progress)
+    on_progress("扫描完成，正在同步知识库…")
+    sync_result = synchronize_authorized_sources(on_progress=on_progress)
+    return {"scan": scan_result, "sync": sync_result}
 
 
 class BackgroundWorker(QObject):
@@ -280,7 +363,21 @@ class MainWindow(QMainWindow):
         self.active_language = get_language_preference(reload=True)
         self.voice_settings = get_voice_settings()
         self.current_theme = get_theme(self.active_persona["id"])
+        self.scanner_config_error = ""
+
+        try:
+            self.scanner_settings = load_scanner_config()
+        except FileScannerError as error:
+            self.scanner_settings = {
+                "watch_folders": [],
+                "ignored_folders": [],
+                "scan_on_startup": False,
+            }
+            self.scanner_config_error = str(error)
+
         self.documents = []
+        self.source_file_records = []
+        self.latest_source_scan = None
         self.worker_threads = set()
         self.current_ai_panel = None
         self.latest_idle_avatar_panel = None
@@ -303,6 +400,7 @@ class MainWindow(QMainWindow):
         self._updating_voice_controls = False
         self.chat_busy = False
         self.cloud_sync_busy = False
+        self.source_operation_busy = False
         self.voice_transcribing = False
         self.speech_queue_bridge = SpeechQueueBridge(self)
         self.speech_queue_bridge.activity_changed.connect(
@@ -320,8 +418,12 @@ class MainWindow(QMainWindow):
         self._sync_voice_controls()
         self._update_persona_display(add_greeting=True)
         self.refresh_library()
+        self.refresh_knowledge_sources()
         self._sync_cloud_files()
         self._run_health_check()
+
+        if self.scanner_settings["scan_on_startup"]:
+            self.scan_knowledge_sources(startup=True)
 
         if self.voice_settings["enabled"]:
             self._refresh_audio_devices()
@@ -519,17 +621,23 @@ class MainWindow(QMainWindow):
         page.setObjectName("pageRoot")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(18)
+        layout.setSpacing(14)
 
-        title = QLabel("知识库")
+        title = QLabel("知识管理")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "云端文件先同步到本地缓存；Embedding 和 ChromaDB 数据仍保留在本机。"
+            "Personal AI 仅扫描您主动添加的文件夹；本地知识与云端缓存相互独立。"
         )
         subtitle.setObjectName("mutedLabel")
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        self.knowledge_tabs = QTabWidget()
+        self.knowledge_tabs.setObjectName("knowledgeTabs")
+        library_tab = QWidget()
+        library_layout = QVBoxLayout(library_tab)
+        library_layout.setContentsMargins(12, 14, 12, 12)
+        library_layout.setSpacing(12)
         buttons = QHBoxLayout()
         self.import_button = QPushButton("导入文档")
         self.delete_button = QPushButton("删除文档")
@@ -554,14 +662,15 @@ class MainWindow(QMainWindow):
             buttons.addWidget(button)
 
         buttons.addStretch()
-        layout.addLayout(buttons)
+        library_layout.addLayout(buttons)
 
         self.cloud_status = QLabel("")
         self.cloud_status.setObjectName("mutedLabel")
         self.cloud_status.setWordWrap(True)
-        layout.addWidget(self.cloud_status)
+        library_layout.addWidget(self.cloud_status)
 
         self.knowledge_table = QTableWidget(0, 5)
+        self.knowledge_table.setAlternatingRowColors(True)
         self.knowledge_table.setHorizontalHeaderLabels(
             ["文件名", "类型", "Chunk 数", "PDF 页数", "源路径"]
         )
@@ -579,12 +688,144 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.knowledge_table, 1)
+        library_layout.addWidget(self.knowledge_table, 1)
 
         self.knowledge_status = QLabel("")
         self.knowledge_status.setObjectName("mutedLabel")
-        layout.addWidget(self.knowledge_status)
+        library_layout.addWidget(self.knowledge_status)
+        self.knowledge_tabs.addTab(library_tab, "知识库")
+        self.knowledge_tabs.addTab(self._build_sources_tab(), "知识来源")
+        layout.addWidget(self.knowledge_tabs, 1)
         return page
+
+    def _build_sources_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 14, 12, 12)
+        layout.setSpacing(10)
+
+        privacy = QLabel("仅访问您通过“添加文件夹”明确授权的目录，不会扫描整块硬盘或用户目录。")
+        privacy.setObjectName("sourcePrivacyNotice")
+        privacy.setWordWrap(True)
+        layout.addWidget(privacy)
+
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(9)
+        self.source_summary_values = {}
+
+        for column, (key, label) in enumerate(
+            (
+                ("folders", "已连接目录"),
+                ("files", "文件总数"),
+                ("indexed", "已索引"),
+                ("pending", "待同步"),
+                ("failed", "失败"),
+            )
+        ):
+            card = QFrame()
+            card.setObjectName("sourceSummaryCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 9, 12, 9)
+            card_layout.setSpacing(2)
+            value = QLabel("0")
+            value.setObjectName("sourceSummaryValue")
+            caption = QLabel(label)
+            caption.setObjectName("mutedLabel")
+            card_layout.addWidget(value)
+            card_layout.addWidget(caption)
+            summary_grid.addWidget(card, 0, column)
+            self.source_summary_values[key] = value
+
+        layout.addLayout(summary_grid)
+
+        actions = QHBoxLayout()
+        self.add_source_button = QPushButton("＋ 添加文件夹")
+        self.scan_sources_button = QPushButton("立即扫描")
+        self.sync_sources_button = QPushButton("同步知识库")
+        self.scan_sync_sources_button = QPushButton("扫描并同步")
+        self.scan_sync_sources_button.setObjectName("primaryButton")
+        self.add_source_button.clicked.connect(self.choose_knowledge_source_folder)
+        self.scan_sources_button.clicked.connect(self.scan_knowledge_sources)
+        self.sync_sources_button.clicked.connect(self.sync_knowledge_sources)
+        self.scan_sync_sources_button.clicked.connect(self.scan_and_sync_knowledge_sources)
+
+        for button in (
+            self.add_source_button,
+            self.scan_sources_button,
+            self.sync_sources_button,
+            self.scan_sync_sources_button,
+        ):
+            actions.addWidget(button)
+
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self.source_progress = QLabel("")
+        self.source_progress.setObjectName("sourceProgress")
+        self.source_progress.setWordWrap(True)
+        layout.addWidget(self.source_progress)
+
+        self.source_folder_table = QTableWidget(0, 8)
+        self.source_folder_table.setObjectName("sourceFolderTable")
+        self.source_folder_table.setMaximumHeight(170)
+        self.source_folder_table.setHorizontalHeaderLabels(
+            ["授权目录", "状态", "文件", "已索引", "待同步", "失败", "最近扫描", ""]
+        )
+        self.source_folder_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.source_folder_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.source_folder_table.verticalHeader().setVisible(False)
+        folder_header = self.source_folder_table.horizontalHeader()
+        folder_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+
+        for column in range(1, 8):
+            folder_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+
+        layout.addWidget(self.source_folder_table)
+
+        self.source_hierarchy = QPlainTextEdit()
+        self.source_hierarchy.setObjectName("sourceHierarchy")
+        self.source_hierarchy.setReadOnly(True)
+        self.source_hierarchy.setMaximumHeight(92)
+        self.source_hierarchy.setPlaceholderText("添加知识文件夹后将在这里显示一级目录分布。")
+        layout.addWidget(self.source_hierarchy)
+
+        filters = QHBoxLayout()
+        self.source_search = QLineEdit()
+        self.source_search.setPlaceholderText("搜索文件...")
+        self.source_status_filter = QComboBox()
+        self.source_status_filter.addItems(("全部", "已索引", "待同步", "失败"))
+        self.source_search.textChanged.connect(self._filter_source_files)
+        self.source_status_filter.currentIndexChanged.connect(self._filter_source_files)
+        filters.addWidget(self.source_search, 1)
+        filters.addWidget(self.source_status_filter)
+        layout.addLayout(filters)
+
+        self.source_file_table = QTableWidget(0, 6)
+        self.source_file_table.setObjectName("sourceFileTable")
+        self.source_file_table.setAlternatingRowColors(True)
+        self.source_file_table.setHorizontalHeaderLabels(
+            ["文件名", "相对路径", "类型", "状态", "最后修改", "最后索引"]
+        )
+        self.source_file_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.source_file_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.source_file_table.verticalHeader().setVisible(False)
+        file_header = self.source_file_table.horizontalHeader()
+        file_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        file_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        for column in range(2, 6):
+            file_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+
+        layout.addWidget(self.source_file_table, 1)
+
+        self.source_activity_log = QPlainTextEdit()
+        self.source_activity_log.setObjectName("sourceActivityLog")
+        self.source_activity_log.setReadOnly(True)
+        self.source_activity_log.setMaximumHeight(82)
+        self.source_activity_log.document().setMaximumBlockCount(80)
+        self.source_activity_log.setPlaceholderText("扫描与同步日志将在这里显示。")
+        layout.addWidget(self.source_activity_log)
+        return tab
 
     def _build_persona_page(self):
         page = QWidget()
@@ -671,6 +912,30 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
             label.setObjectName("settingsLine")
             layout.addWidget(label)
+
+        scanner_section = QFrame()
+        scanner_section.setObjectName("settingsSection")
+        scanner_layout = QVBoxLayout(scanner_section)
+        scanner_layout.setContentsMargins(18, 16, 18, 18)
+        scanner_layout.setSpacing(9)
+        scanner_title = QLabel("知识来源扫描")
+        scanner_title.setObjectName("sectionTitle")
+        scanner_description = QLabel(
+            "默认关闭。开启后只在应用启动时异步检测已授权目录的文件变化，不会自动生成 Embedding。"
+        )
+        scanner_description.setObjectName("mutedLabel")
+        scanner_description.setWordWrap(True)
+        self.scan_on_startup_checkbox = QCheckBox("启动时扫描知识来源")
+        self.scan_on_startup_checkbox.setChecked(
+            self.scanner_settings["scan_on_startup"]
+        )
+        self.scan_on_startup_checkbox.toggled.connect(
+            self._scan_on_startup_setting_changed
+        )
+        scanner_layout.addWidget(scanner_title)
+        scanner_layout.addWidget(scanner_description)
+        scanner_layout.addWidget(self.scan_on_startup_checkbox)
+        layout.addWidget(scanner_section)
 
         voice_section = QFrame()
         voice_section.setObjectName("settingsSection")
@@ -1371,6 +1636,7 @@ class MainWindow(QMainWindow):
 
         if index == 1:
             self.refresh_library()
+            self.refresh_knowledge_sources()
 
     def _run_worker(
         self,
@@ -1643,6 +1909,408 @@ class MainWindow(QMainWindow):
             f"共 {len(self.documents)} 个文档，"
             f"{sum(document['chunk_count'] for document in self.documents)} 个 Chunk。"
         )
+
+    def refresh_knowledge_sources(self, status_message=None):
+        """Render authorized folders and the latest persisted scanner state."""
+
+        try:
+            self.scanner_settings = load_scanner_config()
+            index = load_file_index()
+            self.scanner_config_error = ""
+        except (FileScannerError, OSError) as error:
+            self.scanner_config_error = str(error)
+            self.source_progress.setText(f"无法读取知识来源配置：{error}")
+            return
+
+        if hasattr(self, "scan_on_startup_checkbox"):
+            self.scan_on_startup_checkbox.blockSignals(True)
+            self.scan_on_startup_checkbox.setChecked(
+                self.scanner_settings["scan_on_startup"]
+            )
+            self.scan_on_startup_checkbox.blockSignals(False)
+
+        source_rows = []
+        visible_records = []
+
+        for folder in self.scanner_settings["watch_folders"]:
+            root = Path(folder).expanduser().resolve()
+            records = [
+                record
+                for record in index["files"]
+                if record.get("path") and self._path_is_within(record["path"], root)
+            ]
+            source_rows.append((root, records, self._source_last_scan(index, root)))
+
+            for record in records:
+                visible_records.append(self._source_display_record(record, root))
+
+        indexed_count = sum(record["status"] == "已索引" for record in visible_records)
+        failed_count = sum(record["status"] == "失败" for record in visible_records)
+        pending_count = len(visible_records) - indexed_count - failed_count
+        connected_count = sum(root.is_dir() for root, _, _ in source_rows)
+        summary_values = {
+            "folders": connected_count,
+            "files": len(visible_records),
+            "indexed": indexed_count,
+            "pending": pending_count,
+            "failed": failed_count,
+        }
+
+        for key, value in summary_values.items():
+            self.source_summary_values[key].setText(str(value))
+
+        self._populate_source_folder_table(source_rows)
+        self._populate_source_hierarchy(source_rows)
+        self.source_file_records = sorted(
+            visible_records,
+            key=lambda item: (item["relative_path"].casefold(), item["record"]["name"].casefold()),
+        )
+        self._populate_source_file_table()
+
+        if status_message is not None:
+            self.source_progress.setText(status_message)
+        elif self.scanner_config_error:
+            self.source_progress.setText(
+                f"无法读取知识来源配置：{self.scanner_config_error}"
+            )
+        elif not source_rows:
+            self.source_progress.setText("尚未授权知识文件夹。")
+        else:
+            self.source_progress.setText(
+                f"已授权 {len(source_rows)} 个目录；Personal AI 不会访问其他路径。"
+            )
+
+    def _populate_source_folder_table(self, source_rows):
+        self.source_folder_table.setRowCount(len(source_rows))
+        self.source_remove_buttons = []
+
+        for row, (root, records, last_scan) in enumerate(source_rows):
+            statuses = [self._source_display_record(record, root)["status"] for record in records]
+            indexed = sum(status == "已索引" for status in statuses)
+            failed = sum(status == "失败" for status in statuses)
+            pending = len(records) - indexed - failed
+            values = (
+                root.as_posix(),
+                "已连接" if root.is_dir() else "目录不可用",
+                str(len(records)),
+                str(indexed),
+                str(pending),
+                str(failed),
+                self._format_index_time(last_scan),
+            )
+
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+
+                if column == 1 and not root.is_dir():
+                    item.setToolTip("文件夹可能已删除、网络盘离线或当前没有访问权限。")
+
+                self.source_folder_table.setItem(row, column, item)
+
+            remove_button = QPushButton("移除")
+            remove_button.setObjectName("sourceRemoveButton")
+            remove_button.clicked.connect(
+                lambda checked=False, path=root.as_posix(): self.remove_knowledge_source(path)
+            )
+            remove_button.setDisabled(self.source_operation_busy)
+            self.source_folder_table.setCellWidget(row, 7, remove_button)
+            self.source_remove_buttons.append(remove_button)
+
+    def _populate_source_hierarchy(self, source_rows):
+        lines = []
+
+        for root, records, _ in source_rows:
+            lines.append(root.name or root.as_posix())
+            counts = {}
+
+            for record in records:
+                try:
+                    relative = Path(record["path"]).resolve().relative_to(root)
+                except ValueError:
+                    continue
+
+                group = relative.parts[0] if len(relative.parts) > 1 else "根目录"
+                counts[group] = counts.get(group, 0) + 1
+
+            for name, count in sorted(counts.items(), key=lambda item: item[0].casefold()):
+                lines.append(f"├ {name} · {count}")
+
+        self.source_hierarchy.setPlainText("\n".join(lines))
+
+    def _populate_source_file_table(self):
+        self.source_file_table.setRowCount(len(self.source_file_records))
+
+        for row, display_record in enumerate(self.source_file_records):
+            record = display_record["record"]
+            values = (
+                record["name"],
+                display_record["relative_path"],
+                record["extension"].lstrip(".").upper(),
+                display_record["status"],
+                self._format_modified_time(record.get("modified_time")),
+                self._format_index_time(record.get("last_indexed")),
+            )
+
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+
+                if display_record["status"] == "失败" and record.get("last_error"):
+                    item.setToolTip(record["last_error"])
+
+                self.source_file_table.setItem(row, column, item)
+
+        self._filter_source_files()
+
+    def _filter_source_files(self, *unused_arguments):
+        del unused_arguments
+        query = self.source_search.text().strip().casefold()
+        selected_status = self.source_status_filter.currentText()
+
+        for row, display_record in enumerate(self.source_file_records):
+            record = display_record["record"]
+            searchable = f"{record['name']} {display_record['relative_path']}".casefold()
+            status = display_record["status"]
+            status_matches = (
+                selected_status == "全部"
+                or selected_status == status
+                or selected_status == "待同步"
+                and status in {"新增", "已修改", "待处理"}
+            )
+            self.source_file_table.setRowHidden(
+                row,
+                query not in searchable or not status_matches,
+            )
+
+    def choose_knowledge_source_folder(self):
+        selected_folder = QFileDialog.getExistingDirectory(
+            self,
+            "选择允许 Personal AI 扫描的文件夹",
+            str(Path.home()),
+        )
+
+        if not selected_folder:
+            return
+
+        try:
+            added = add_watch_folder(selected_folder)
+        except (FileScannerError, OSError, ValueError) as error:
+            self.source_progress.setText(f"无法添加知识来源：{error}")
+            return
+
+        if added:
+            self.refresh_knowledge_sources(
+                f"已授权：{Path(selected_folder).resolve().as_posix()}"
+            )
+        else:
+            self.source_progress.setText("该文件夹已在知识来源中。")
+
+    def remove_knowledge_source(self, folder_path):
+        answer = QMessageBox.question(
+            self,
+            "移除知识来源",
+            "该文件夹将停止自动同步，已存在的知识库内容不会被删除。\n\n"
+            "用户电脑上的原文件也不会被删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            removed = remove_watch_folder(folder_path)
+        except (FileScannerError, OSError, ValueError) as error:
+            self.source_progress.setText(f"无法移除知识来源：{error}")
+            return
+
+        if removed:
+            self.refresh_knowledge_sources("已取消该目录的自动扫描授权；原文件和已有索引均已保留。")
+
+    def scan_knowledge_sources(self, checked=False, startup=False):
+        del checked
+
+        if not self.scanner_settings["watch_folders"]:
+            self.source_progress.setText("请先添加一个知识文件夹。")
+            return
+
+        self._start_source_operation("正在扫描知识来源…")
+        self._run_worker(
+            scan_authorized_sources,
+            on_progress=self._append_source_progress,
+            on_success=self._source_scan_succeeded,
+            on_error=self._source_operation_failed,
+            on_finished=self._finish_source_operation,
+        )
+
+        if startup:
+            self._append_source_progress("启动扫描只检测变化，不会自动同步知识库。")
+
+    def sync_knowledge_sources(self, checked=False):
+        del checked
+
+        if not self.scanner_settings["watch_folders"]:
+            self.source_progress.setText("请先添加一个知识文件夹。")
+            return
+
+        self._start_source_operation("正在同步知识库…")
+        self._run_worker(
+            synchronize_authorized_sources,
+            on_progress=self._append_source_progress,
+            on_success=self._source_sync_succeeded,
+            on_error=self._source_operation_failed,
+            on_finished=self._finish_source_operation,
+        )
+
+    def scan_and_sync_knowledge_sources(self, checked=False):
+        del checked
+
+        if not self.scanner_settings["watch_folders"]:
+            self.source_progress.setText("请先添加一个知识文件夹。")
+            return
+
+        self._start_source_operation("正在扫描并同步知识库…")
+        self._run_worker(
+            scan_and_synchronize_sources,
+            on_progress=self._append_source_progress,
+            on_success=self._scan_and_sync_succeeded,
+            on_error=self._source_operation_failed,
+            on_finished=self._finish_source_operation,
+        )
+
+    def _source_scan_succeeded(self, result):
+        self.latest_source_scan = result
+        message = (
+            f"扫描完成：发现文件 {result['file_count']}，新增 {result['new_count']}，"
+            f"修改 {result['modified_count']}，未变化 {result['unchanged_count']}，"
+            f"失败 {len(result['errors'])}。"
+        )
+        self.refresh_knowledge_sources(message)
+        self._append_source_progress(message)
+
+    def _source_sync_succeeded(self, result):
+        message = (
+            f"同步完成：新增 {len(result['imported'])}，更新 {len(result['reindexed'])}，"
+            f"跳过 {len(result['skipped'])}，失败 {len(result['failed'])}。"
+        )
+        self.refresh_library()
+        self.refresh_knowledge_sources(message)
+        self._append_source_progress(message)
+
+    def _scan_and_sync_succeeded(self, result):
+        self.latest_source_scan = result["scan"]
+        self._source_sync_succeeded(result["sync"])
+
+    def _source_operation_failed(self, message):
+        readable_message = f"知识来源操作失败：{message}"
+        self.source_progress.setText(readable_message)
+        self._append_source_progress(readable_message)
+
+    def _start_source_operation(self, message):
+        self.source_activity_log.clear()
+        self._set_sources_busy(True)
+        self._append_source_progress(message)
+
+    def _finish_source_operation(self):
+        self._set_sources_busy(False)
+
+    def _append_source_progress(self, message):
+        text = str(message).strip()
+
+        if not text:
+            return
+
+        self.source_progress.setText(text)
+        self.source_activity_log.appendPlainText(text)
+
+    def _set_sources_busy(self, busy):
+        self.source_operation_busy = bool(busy)
+
+        for button in (
+            self.add_source_button,
+            self.scan_sources_button,
+            self.sync_sources_button,
+            self.scan_sync_sources_button,
+            *getattr(self, "source_remove_buttons", []),
+        ):
+            button.setDisabled(self.source_operation_busy)
+
+    def _scan_on_startup_setting_changed(self, checked):
+        try:
+            self.scanner_settings = set_scan_on_startup(bool(checked))
+        except (FileScannerError, OSError, ValueError) as error:
+            self.source_progress.setText(f"无法保存启动扫描设置：{error}")
+            self.scan_on_startup_checkbox.blockSignals(True)
+            self.scan_on_startup_checkbox.setChecked(not checked)
+            self.scan_on_startup_checkbox.blockSignals(False)
+
+    @staticmethod
+    def _path_is_within(candidate, root):
+        try:
+            candidate_path = os.path.normcase(str(Path(candidate).expanduser().resolve()))
+            root_path = os.path.normcase(str(Path(root).expanduser().resolve()))
+            return os.path.commonpath((candidate_path, root_path)) == root_path
+        except ValueError:
+            return False
+
+    @classmethod
+    def _source_display_record(cls, record, root):
+        try:
+            relative = Path(record["path"]).resolve().relative_to(root)
+            relative_parent = relative.parent.as_posix()
+            relative_path = root.name
+
+            if relative_parent != ".":
+                relative_path = f"{root.name}/{relative_parent}"
+        except ValueError:
+            relative_path = root.name
+
+        status = (
+            "失败"
+            if record.get("last_error") or record.get("scan_status") == "failed"
+            else "已索引"
+            if record.get("processed")
+            else "新增"
+            if record.get("scan_status") == "new"
+            else "已修改"
+            if record.get("scan_status") == "modified"
+            else "待处理"
+        )
+        return {
+            "record": record,
+            "root": root,
+            "relative_path": relative_path,
+            "status": status,
+        }
+
+    @staticmethod
+    def _source_last_scan(index, root):
+        for folder, timestamp in index.get("scans", {}).items():
+            if os.path.normcase(str(Path(folder))) == os.path.normcase(str(root)):
+                return timestamp
+
+        return None
+
+    @staticmethod
+    def _format_modified_time(timestamp):
+        if timestamp is None:
+            return "—"
+
+        try:
+            return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError, OSError):
+            return "—"
+
+    @staticmethod
+    def _format_index_time(timestamp):
+        if not timestamp:
+            return "—"
+
+        try:
+            return datetime.fromisoformat(str(timestamp)).astimezone().strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except ValueError:
+            return "—"
 
     def _sync_cloud_files(self):
         if self.cloud_sync_busy:

@@ -137,6 +137,21 @@ automatic synchronization. The local document loader also extracts standard DOCX
 paragraph text through WordprocessingML so all Phase 8 scanner formats can enter
 the same existing import pipeline without Office automation or a cloud service.
 
+## Phase 8.6: Knowledge Sources Management
+
+The desktop Knowledge page contains separate **知识库** and **知识来源** tabs.
+Knowledge Sources shows authorized folders, file/index/pending/failure summaries,
+first-level folder distribution, searchable file status, scan/sync progress, and
+bounded activity logs. Folder access is granted only through Qt's directory
+picker; revoking a folder updates `scanner.json` without deleting source files or
+existing knowledge records.
+
+Scan, knowledge sync, and the combined scan-and-sync action use the existing Qt
+worker thread infrastructure, so hashing, parsing, embeddings, and Chroma writes
+never execute on the UI thread. Settings includes an opt-in startup scan, disabled
+by default. Startup scanning detects file changes only and never starts a large
+indexing operation without a separate user action.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

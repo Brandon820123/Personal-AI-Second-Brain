@@ -281,7 +281,47 @@ def build_stylesheet(theme):
             font-size: 15px;
             font-weight: 700;
         }}
-        QPlainTextEdit, QComboBox {{
+        #knowledgeTabs::pane {{
+            border: 1px solid {theme['border']};
+            border-radius: {card_radius}px;
+            background: {theme['page']};
+        }}
+        QTabBar::tab {{
+            background: {theme['surface']};
+            color: {theme['muted']};
+            border: 1px solid {theme['border']};
+            padding: 8px 18px;
+        }}
+        QTabBar::tab:selected {{
+            color: {theme['accent_bright']};
+            background: {theme['accent_soft']};
+            border-bottom-color: {theme['accent']};
+        }}
+        #sourcePrivacyNotice {{
+            color: {theme['status_text']};
+            background: {theme['status_surface']};
+            border-left: 3px solid {theme['accent']};
+            border-radius: {radius}px;
+            padding: 8px 10px;
+        }}
+        #sourceSummaryCard {{
+            background: {theme['surface']};
+            border: 1px solid {theme['border']};
+            border-radius: {radius}px;
+        }}
+        #sourceSummaryValue {{
+            color: {theme['accent_bright']};
+            font-size: 18px;
+            font-weight: 700;
+        }}
+        #sourceProgress {{ color: {theme['status_text']}; }}
+        #sourceHierarchy, #sourceActivityLog {{
+            background: {theme['surface']};
+            border-color: {theme['border']};
+            font-size: 11px;
+        }}
+        #sourceRemoveButton {{ padding: 5px 9px; }}
+        QPlainTextEdit, QLineEdit, QComboBox {{
             background: {theme['surface']};
             border: 1px solid {theme['border']};
             border-radius: {radius}px;

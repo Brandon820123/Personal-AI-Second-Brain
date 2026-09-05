@@ -9,5 +9,6 @@
     "venv",
     ".venv",
     ".env"
-  ]
+  ],
+  "scan_on_startup": false
 }

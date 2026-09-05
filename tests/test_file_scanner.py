@@ -8,10 +8,13 @@ from pathlib import Path
 
 from app.file_scanner import (
     DEFAULT_IGNORED_FOLDERS,
+    add_watch_folder,
     build_file_info,
     format_scan_report,
     load_file_index,
     load_scanner_config,
+    remove_watch_folder,
+    set_scan_on_startup,
     scan_folder,
 )
 
@@ -124,6 +127,32 @@ class FileScannerTests(unittest.TestCase):
         self.assertEqual(config["watch_folders"], [self.root.as_posix()])
         self.assertTrue(DEFAULT_IGNORED_FOLDERS.issubset(config["ignored_folders"]))
         self.assertIn("build", config["ignored_folders"])
+
+    def test_folder_authorization_avoids_duplicates_and_removal_is_non_destructive(self):
+        config_path = Path(self.temporary_directory.name) / "scanner.json"
+        document = self.root / "private.txt"
+        document.write_text("keep me", encoding="utf-8")
+
+        self.assertTrue(add_watch_folder(self.root, config_path))
+        self.assertFalse(add_watch_folder(self.root, config_path))
+        self.assertEqual(
+            load_scanner_config(config_path)["watch_folders"],
+            [self.root.resolve().as_posix()],
+        )
+
+        self.assertTrue(remove_watch_folder(self.root, config_path))
+        self.assertFalse(remove_watch_folder(self.root, config_path))
+        self.assertTrue(document.is_file())
+        self.assertEqual(load_scanner_config(config_path)["watch_folders"], [])
+
+    def test_startup_scan_setting_defaults_off_and_persists_opt_in(self):
+        config_path = Path(self.temporary_directory.name) / "scanner.json"
+
+        self.assertFalse(load_scanner_config(config_path)["scan_on_startup"])
+        updated = set_scan_on_startup(True, config_path)
+
+        self.assertTrue(updated["scan_on_startup"])
+        self.assertTrue(load_scanner_config(config_path)["scan_on_startup"])
 
 
 if __name__ == "__main__":

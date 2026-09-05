@@ -59,6 +59,7 @@ def load_scanner_config(config_path=DEFAULT_CONFIG_PATH):
         return {
             "watch_folders": [],
             "ignored_folders": sorted(DEFAULT_IGNORED_FOLDERS),
+            "scan_on_startup": False,
         }
 
     try:
@@ -85,7 +86,110 @@ def load_scanner_config(config_path=DEFAULT_CONFIG_PATH):
     return {
         "watch_folders": [str(folder).strip() for folder in watch_folders if str(folder).strip()],
         "ignored_folders": sorted(merged_ignored),
+        "scan_on_startup": bool(config.get("scan_on_startup", False)),
     }
+
+
+def save_scanner_config(config, config_path=DEFAULT_CONFIG_PATH):
+    """Validate and atomically persist local folder authorization settings."""
+
+    if not isinstance(config, dict):
+        raise FileScannerError("Scanner configuration must be a mapping.")
+
+    watch_folders = config.get("watch_folders", [])
+    ignored_folders = config.get("ignored_folders", [])
+
+    if not isinstance(watch_folders, list) or not isinstance(ignored_folders, list):
+        raise FileScannerError(
+            "Scanner watch_folders and ignored_folders must be arrays."
+        )
+
+    normalized_folders = []
+    seen_paths = set()
+
+    for folder in watch_folders:
+        folder_text = str(folder).strip()
+
+        if not folder_text:
+            continue
+
+        normalized_path = Path(folder_text).expanduser().resolve().as_posix()
+        comparison_path = _comparison_path(normalized_path)
+
+        if comparison_path not in seen_paths:
+            seen_paths.add(comparison_path)
+            normalized_folders.append(normalized_path)
+
+    normalized_config = {
+        "watch_folders": normalized_folders,
+        "ignored_folders": sorted(
+            DEFAULT_IGNORED_FOLDERS
+            | {
+                str(folder).strip().casefold()
+                for folder in ignored_folders
+                if str(folder).strip()
+            }
+        ),
+        "scan_on_startup": bool(config.get("scan_on_startup", False)),
+    }
+    path = Path(config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(
+        f"{json.dumps(normalized_config, ensure_ascii=False, indent=2)}\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+    return normalized_config
+
+
+def add_watch_folder(folder_path, config_path=DEFAULT_CONFIG_PATH):
+    """Authorize one explicitly selected folder, returning whether it was added."""
+
+    folder = Path(folder_path).expanduser().resolve()
+
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Knowledge source folder not found: {folder}")
+
+    config = load_scanner_config(config_path)
+    comparison_path = _comparison_path(folder)
+
+    if any(
+        _comparison_path(existing) == comparison_path
+        for existing in config["watch_folders"]
+    ):
+        return False
+
+    config["watch_folders"].append(folder.as_posix())
+    save_scanner_config(config, config_path)
+    return True
+
+
+def remove_watch_folder(folder_path, config_path=DEFAULT_CONFIG_PATH):
+    """Revoke one folder without deleting source files or knowledge records."""
+
+    config = load_scanner_config(config_path)
+    comparison_path = _comparison_path(folder_path)
+    retained = [
+        existing
+        for existing in config["watch_folders"]
+        if _comparison_path(existing) != comparison_path
+    ]
+
+    if len(retained) == len(config["watch_folders"]):
+        return False
+
+    config["watch_folders"] = retained
+    save_scanner_config(config, config_path)
+    return True
+
+
+def set_scan_on_startup(enabled, config_path=DEFAULT_CONFIG_PATH):
+    """Persist the opt-in startup scan preference without starting a scan."""
+
+    config = load_scanner_config(config_path)
+    config["scan_on_startup"] = bool(enabled)
+    return save_scanner_config(config, config_path)
 
 
 def load_file_index(index_path=DEFAULT_INDEX_PATH):
@@ -208,12 +312,21 @@ def scan_folder(
         if previous is None:
             classification = new_files
             processed = False
+            scan_status = "new"
         elif previous.get("hash") != record["hash"]:
             classification = modified_files
             processed = False
+            scan_status = "modified"
         else:
             classification = unchanged_files
             processed = bool(previous.get("processed", False))
+            scan_status = (
+                "indexed"
+                if processed
+                else "failed"
+                if previous.get("last_error")
+                else "pending"
+            )
 
         classification.append(record)
         indexed_record = {
@@ -221,6 +334,12 @@ def scan_folder(
             "processed": processed,
             "knowledge_id": previous.get("knowledge_id") if previous else None,
             "last_indexed": previous.get("last_indexed") if previous else None,
+            "scan_status": scan_status,
+            "last_error": (
+                previous.get("last_error")
+                if previous and scan_status == "failed"
+                else None
+            ),
         }
 
         indexed_records.append(indexed_record)

@@ -121,7 +121,7 @@ def sync_new_documents(
             else:
                 candidates.append(("pending", record))
 
-        for change_type, record in candidates:
+        for position, (change_type, record) in enumerate(candidates, start=1):
             indexed_record = indexed_by_path.get(_comparison_path(record["path"]), {})
             existing_document = _find_existing_document(
                 record,
@@ -142,6 +142,7 @@ def sync_new_documents(
 
             log_function(relative_path)
             log_function("Processing...")
+            log_function(f"Progress: {position} / {len(candidates)}")
 
             try:
                 progress = lambda message: log_function(f"  {message}")
@@ -175,6 +176,7 @@ def sync_new_documents(
                     knowledge_id=stored_document["source_id"],
                     last_indexed=indexed_at,
                     last_error=None,
+                    scan_status="indexed",
                 )
                 indexed_by_path[_comparison_path(record["path"])] = {
                     **indexed_record,
@@ -201,8 +203,9 @@ def sync_new_documents(
                     _update_index_record(
                         record["path"],
                         index_path=index_path,
-                        processed=False,
-                        last_error=str(error),
+                    processed=False,
+                    last_error=str(error),
+                    scan_status="failed",
                     )
                 except Exception as index_error:
                     log_function(f"Index status warning: {index_error}")
