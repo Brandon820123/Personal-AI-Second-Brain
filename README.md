@@ -152,6 +152,115 @@ never execute on the UI thread. Settings includes an opt-in startup scan, disabl
 by default. Startup scanning detects file changes only and never starts a large
 indexing operation without a separate user action.
 
+## Phase 9A: Memory System v1 (Backend Only)
+
+`app/memory_store.py` persists deliberate long-term information in the local
+SQLite database `data/memory.db`. It uses Python's standard-library `sqlite3`;
+there is no new package, embedding model, cloud service, or Chroma collection.
+The path is resolved from the project directory, independent of the process's
+working directory. Importing the modules does not open a database. The first
+storage operation creates the parent directory, tables, and indexes as needed.
+Database files and SQLite journal sidecars are excluded from Git.
+
+The `memories` table stores these fields:
+
+| Field | SQLite type | Meaning |
+| --- | --- | --- |
+| `id` | TEXT PRIMARY KEY | Stable UUID |
+| `content` | TEXT NOT NULL | Selected fact or summary, up to 4000 characters |
+| `memory_type` | TEXT NOT NULL | `personal`, `project`, or `conversation` |
+| `importance` | INTEGER NOT NULL | Integer from 1 to 5; default 3 |
+| `created_at` | TEXT NOT NULL | UTC ISO 8601 creation time |
+| `updated_at` | TEXT NOT NULL | UTC ISO 8601 last-edit time |
+| `source` | TEXT NOT NULL | Origin, e.g. `manual`, `chat:user`, or `project:atlas` |
+
+`personal` holds preferences, habits, and information explicitly selected by the
+user. `project` holds progress, decisions, and TODOs. `conversation` holds an
+important summary explicitly supplied by the user or a future reviewed-summary
+workflow. The store does not infer facts or assess free-form summaries: callers
+of `add_memory()` must select information that has long-term value.
+
+The indexed `memory_terms(memory_id, term)` table supports local retrieval. Its
+foreign key cascades deletions, and writes update content and search terms in one
+transaction. Identical `(content, memory_type)` additions reuse the existing
+record without overwriting its metadata. Each operation opens and closes its own
+SQLite connection so a manager can be used by the existing background workers.
+Invalid input raises `ValueError`; database or filesystem failures raise
+`MemoryStoreError`. Missing IDs return `None` for reads/updates and `False` for
+deletions. Updates preserve `id` and `created_at`.
+
+`app/memory_manager.py` exposes the five basic functions and a `MemoryManager`
+class suitable for dependency injection and a later GUI:
+
+```python
+from app.memory_manager import MemoryManager
+
+memory = MemoryManager()  # Optional db_path=... for an isolated database.
+record = memory.add_memory(
+    "Atlas project decided to use SQLite for local memory.",
+    memory_type="project",
+    importance=4,
+    source="project:atlas",
+)
+record = memory.get_memory(record["id"])
+record = memory.update_memory(record["id"], importance=5)
+matches = memory.search_memories("Atlas SQLite", memory_type="project", limit=3)
+page = memory.list_memories(memory_type="project", limit=20, offset=0)
+deleted = memory.delete_memory(record["id"])
+```
+
+Normal chat only captures a leading, explicit remember command, for example
+`请记住：我长期使用 Python 开发后端。`,
+`请记住：[project] Atlas 项目决定使用 SQLite。`, or
+`Please remember [conversation]: We agreed to review Atlas milestones weekly.`
+The optional tags are `personal`, `project`, and `conversation`; Chinese prefixes
+`个人：`, `项目：`, and `对话摘要：` are also accepted. Untagged requests use
+`personal`, importance 4, and source `chat:user`. Ordinary statements, quoted
+commands, recall questions, empty requests, and oversized requests are not
+automatically saved. There is no automatic archive of user messages, model
+answers, imported documents, or all conversations. Deliberate summaries and
+project notes can always be supplied through the backend API.
+
+On each normal-chat message, the manager first handles any explicit save request
+and then retrieves relevant memory. Both desktop and CLI RAG retrieve from the
+original question only; their prompt builder does not capture memories. CLI
+document summarization bypasses Memory entirely. Retrieval normalizes English
+words and Chinese adjacent-character pairs, removes common filler terms, and
+uses at most 64 unique query terms. Results rank by matching terms, followed by
+importance and update time. This is lexical retrieval: v1 does not match
+synonyms or translate between languages. Empty or unrelated queries return no
+memories; listing all records is a separate paginated management operation.
+
+Prompt injection includes at most **3 matching memories**, at most **600
+characters per content excerpt**, and **2400 characters for the complete memory
+context**. The JSON reference block includes IDs, types, and edit times, and
+clearly states that current requests, Persona, language, and RAG grounding rules
+take precedence. It is inserted after Persona/language messages and before the
+user message; RAG keeps its existing grounding rules after the memory block.
+Memories never become document citations or evidence for grounded answers.
+No-match requests retain the existing prompt structure. Storage failures log a
+generic warning and allow chat to continue; a failed explicit save adds a status
+instruction so the assistant does not claim persistence succeeded.
+
+The existing Ollama stream, callbacks, RAG relevance threshold/source formatting,
+Persona definitions, ChromaDB, Supabase, Scanner, voice, and GUI are unchanged.
+The normal-chat and RAG service entry points accept an optional `memory_manager`
+for isolated tests or future integration.
+
+Run the Memory tests and the full regression suite with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_memory*.py' -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+For Phase 9B, a Memory GUI can call `list_memories()` for pagination/type filters,
+`search_memories()` for relevant results, and the existing CRUD methods for
+add/edit/delete forms. Run these operations in the existing Qt worker mechanism,
+surface `ValueError`/`MemoryStoreError` in the UI, and refresh the displayed page
+after successful writes. Future automatic summary suggestions should be reviewed
+before calling `add_memory()`; no GUI or summary-generation model is part of 9A.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

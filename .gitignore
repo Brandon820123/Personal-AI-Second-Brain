@@ -19,5 +19,7 @@ data/config/persona.json
 data/config/voice.json
 data/documents/
 data/voice/
+data/memory.db
+data/memory.db-*
 test.txt
 /*.pdf

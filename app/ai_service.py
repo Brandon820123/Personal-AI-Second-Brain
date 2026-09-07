@@ -14,6 +14,7 @@ try:
         build_language_instruction,
         get_language_preference,
     )
+    from .memory_manager import prepare_memory_messages
     from .personas import build_persona_instruction, get_active_persona
     from .rag import (
         DEFAULT_TOP_K,
@@ -34,6 +35,7 @@ except ImportError:
         build_language_instruction,
         get_language_preference,
     )
+    from memory_manager import prepare_memory_messages
     from personas import build_persona_instruction, get_active_persona
     from rag import (
         DEFAULT_TOP_K,
@@ -137,6 +139,7 @@ def stream_normal_chat(
     persona=None,
     language=None,
     on_state=lambda state: None,
+    memory_manager=None,
 ):
     """Stream a persona-styled normal-chat response locally."""
     if not isinstance(message, str) or not message.strip():
@@ -155,6 +158,7 @@ def stream_normal_chat(
         },
         {"role": "user", "content": message.strip()},
     ]
+    messages[-1:-1] = prepare_memory_messages(message, memory_manager)
     on_state("thinking")
     _stream_ollama(messages, on_token)
 
@@ -167,6 +171,7 @@ def stream_knowledge_chat(
     top_k=DEFAULT_TOP_K,
     minimum_score=MIN_RELEVANCE_SCORE,
     on_state=lambda state: None,
+    memory_manager=None,
 ):
     """Retrieve local context, stream a grounded answer, and return sources."""
     if not isinstance(question, str) or not question.strip():
@@ -197,7 +202,9 @@ def stream_knowledge_chat(
             f"Question: {question}\n\n"
             "Give a concise, grounded answer."
         )
-        messages = build_rag_system_messages(persona, language, question)
+        messages = build_rag_system_messages(
+            persona, language, question, memory_manager=memory_manager,
+        )
         messages.append({"role": "user", "content": user_message})
         on_state("thinking")
         _stream_ollama(messages, on_token)

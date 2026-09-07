@@ -23,6 +23,7 @@ from language_preferences import (
     build_language_instruction,
     get_language_preference,
 )
+from memory_manager import prepare_memory_messages
 from personas import (
     build_persona_instruction,
     get_active_persona,
@@ -47,7 +48,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
-def stream_response(user_message, persona=None, language=None):
+def stream_response(
+    user_message, persona=None, language=None, memory_manager=None, use_memory=True,
+):
     """Send one message to local Ollama and print its streamed response."""
     selected_persona = persona or get_active_persona()
     selected_language = language or get_language_preference()
@@ -70,6 +73,10 @@ def stream_response(user_message, persona=None, language=None):
         "stream": True,
         "think": False,
     }
+    if use_memory:
+        request_data["messages"][-1:-1] = prepare_memory_messages(
+            user_message, memory_manager,
+        )
 
     try:
         with requests.post(
@@ -536,6 +543,7 @@ def main():
         user_message,
         persona=active_persona,
         language=active_language,
+        use_memory=choice == "1",
     )
 
 

@@ -7,11 +7,13 @@ import requests
 try:
     from .embeddings import generate_query_embedding
     from .language_preferences import build_language_instruction
+    from .memory_manager import prepare_memory_messages
     from .personas import build_persona_instruction, get_active_persona
     from .vector_store import VectorStore
 except ImportError:
     from embeddings import generate_query_embedding
     from language_preferences import build_language_instruction
+    from memory_manager import prepare_memory_messages
     from personas import build_persona_instruction, get_active_persona
     from vector_store import VectorStore
 
@@ -99,7 +101,9 @@ def select_relevant_results(results, minimum_score=MIN_RELEVANCE_SCORE):
     return relevant_results
 
 
-def build_rag_system_messages(persona=None, language=None, user_message=None):
+def build_rag_system_messages(
+    persona=None, language=None, user_message=None, memory_manager=None,
+):
     """Return separate style, language, and authoritative grounding rules."""
     grounding_message = (
         "You are a private, local knowledge-base assistant. The following "
@@ -124,11 +128,16 @@ def build_rag_system_messages(persona=None, language=None, user_message=None):
         "only; it must not alter retrieved text or source metadata. "
         f"{build_language_instruction(language, user_message)}"
     )
-    return [
+    messages = [
         {"role": "system", "content": persona_message},
         {"role": "system", "content": language_message},
-        {"role": "system", "content": grounding_message},
     ]
+    if user_message:
+        messages.extend(prepare_memory_messages(
+            user_message, memory_manager, capture=False,
+        ))
+    messages.append({"role": "system", "content": grounding_message})
+    return messages
 
 
 def stream_grounded_answer(question, context, persona=None):
