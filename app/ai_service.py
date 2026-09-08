@@ -161,12 +161,19 @@ def stream_normal_chat(
         },
         {"role": "user", "content": message.strip()},
     ]
-    messages[-1:-1] = prepare_memory_messages(message, memory_manager)
+    agent_requested = should_use_agent(message)
+    messages[-1:-1] = prepare_memory_messages(
+        message,
+        memory_manager,
+        capture=not agent_requested,
+    )
     active_agent = None
-    if should_use_agent(message):
+    if agent_requested:
         active_agent = agent_core or AgentCore()
         on_state("searching")
         agent_result = active_agent.run(message)
+        if agent_result["pending_confirmation"] is not None:
+            return agent_result
         if agent_result["context"]:
             messages[-1:-1] = [{
                 "role": "system",
@@ -177,6 +184,50 @@ def stream_normal_chat(
     if active_agent is not None:
         active_agent.log_final_response()
     finalize_chat_memory(message, memory_manager)
+
+
+def stream_confirmed_agent_action(
+    message,
+    confirmation_id,
+    agent_core,
+    on_token,
+    persona=None,
+    language=None,
+    on_state=lambda state: None,
+    memory_manager=None,
+):
+    """Execute one explicitly approved action, then stream its Persona response."""
+    if not isinstance(agent_core, AgentCore):
+        raise AIServiceError("The pending Agent action is no longer available.")
+
+    selected_persona = persona or get_active_persona()
+    selected_language = language or get_language_preference()
+    agent_result = agent_core.confirm_action(confirmation_id, True)
+    messages = [
+        {
+            "role": "system",
+            "content": build_persona_instruction(selected_persona),
+        },
+        {
+            "role": "system",
+            "content": build_language_instruction(selected_language, message),
+        },
+        {"role": "user", "content": message.strip()},
+    ]
+    messages[-1:-1] = prepare_memory_messages(
+        message,
+        memory_manager,
+        capture=False,
+    )
+    if agent_result["context"]:
+        messages[-1:-1] = [{
+            "role": "system",
+            "content": agent_result["context"],
+        }]
+    on_state("thinking")
+    _stream_ollama(messages, on_token)
+    agent_core.log_final_response()
+    return agent_result
 
 
 def stream_knowledge_chat(

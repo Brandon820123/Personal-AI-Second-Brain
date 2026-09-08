@@ -1,5 +1,6 @@
 """PySide6 desktop interface for the local Private Personal AI."""
 
+import json
 import os
 import sys
 import time
@@ -36,10 +37,12 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from .agent_core import AgentCore
     from .ai_service import (
         check_ollama,
         import_document,
         reindex_library_document,
+        stream_confirmed_agent_action,
         stream_knowledge_chat,
         stream_normal_chat,
     )
@@ -81,10 +84,12 @@ try:
     from .voice.streaming import StreamingSentenceSegmenter, ThreadedSpeechQueue
     from .voice.tts import LocalPiperTextToSpeech
 except ImportError:
+    from agent_core import AgentCore
     from ai_service import (
         check_ollama,
         import_document,
         reindex_library_document,
+        stream_confirmed_agent_action,
         stream_knowledge_chat,
         stream_normal_chat,
     )
@@ -385,6 +390,9 @@ class MainWindow(QMainWindow):
         self.latest_idle_avatar_panel = None
         self.latest_completed_fairy_panel = None
         self.current_chat_mode = None
+        self.current_user_message = ""
+        self.active_agent_core = None
+        self.pending_agent_confirmation = None
         self.user_message_count = 0
         self.voice_recorder = None
         self.stt_engine = None
@@ -1836,7 +1844,15 @@ class MainWindow(QMainWindow):
         self._set_chat_busy(True)
         mode = self.chat_mode.currentData()
         self.current_chat_mode = mode
+        self.current_user_message = message
+        self.pending_agent_confirmation = None
         operation = stream_knowledge_chat if mode == "rag" else stream_normal_chat
+        operation_kwargs = {}
+        if mode == "normal":
+            self.active_agent_core = AgentCore()
+            operation_kwargs["agent_core"] = self.active_agent_core
+        else:
+            self.active_agent_core = None
 
         self._run_worker(
             operation,
@@ -1847,7 +1863,8 @@ class MainWindow(QMainWindow):
             on_state=self._set_current_panel_state,
             on_success=self._chat_succeeded,
             on_error=self._chat_failed,
-            on_finished=lambda: self._set_chat_busy(False),
+            on_finished=self._chat_worker_finished,
+            **operation_kwargs,
         )
 
     def _append_stream_token(self, token):
@@ -1872,12 +1889,79 @@ class MainWindow(QMainWindow):
         if not self.current_ai_panel:
             return
 
+        if (
+            self.current_chat_mode == "normal"
+            and isinstance(result, dict)
+            and result.get("pending_confirmation") is not None
+        ):
+            self.pending_agent_confirmation = result["pending_confirmation"]
+            return
+
         if result and self.current_chat_mode == "rag":
             self.current_ai_panel.set_sources(result)
 
         completed_panel = self.current_ai_panel
         self._scroll_conversation_to_bottom()
         self._finish_streaming_speech(completed_panel)
+
+    def _chat_worker_finished(self):
+        """Release worker state, then ask on the GUI thread when required."""
+        self._set_chat_busy(False)
+        if self.pending_agent_confirmation is not None:
+            self._request_agent_confirmation()
+        else:
+            self.active_agent_core = None
+
+    def _request_agent_confirmation(self):
+        """Show the frozen write call and execute it only after a Yes click."""
+        pending = self.pending_agent_confirmation
+        agent_core = self.active_agent_core
+        if pending is None or agent_core is None:
+            return
+
+        arguments = json.dumps(
+            pending["arguments"],
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(arguments) > 1800:
+            arguments = arguments[:1799] + "…"
+        answer = QMessageBox.question(
+            self,
+            "确认 Agent 操作",
+            "Agent 请求执行本地写操作：\n\n"
+            f"工具：{pending['tool']}\n"
+            f"参数：\n{arguments}\n\n"
+            "确认执行此操作吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self.pending_agent_confirmation = None
+
+        if answer != QMessageBox.StandardButton.Yes:
+            agent_core.confirm_action(pending["confirmation_id"], False)
+            self.active_agent_core = None
+            if self.current_ai_panel:
+                self.current_ai_panel.append_text("操作已取消，本地数据未修改。")
+                self._finish_streaming_speech(self.current_ai_panel)
+            return
+
+        self._set_chat_busy(True)
+        if self.current_ai_panel:
+            self.current_ai_panel.set_state(PersonaState.SEARCHING)
+        self._run_worker(
+            stream_confirmed_agent_action,
+            self.current_user_message,
+            pending["confirmation_id"],
+            agent_core,
+            persona=dict(self.active_persona),
+            language=dict(self.active_language),
+            on_token=self._append_stream_token,
+            on_state=self._set_current_panel_state,
+            on_success=self._chat_succeeded,
+            on_error=self._chat_failed,
+            on_finished=self._chat_worker_finished,
+        )
 
     def _chat_failed(self, message):
         if self.current_ai_panel:

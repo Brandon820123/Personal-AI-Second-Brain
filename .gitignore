@@ -21,5 +21,7 @@ data/documents/
 data/voice/
 data/memory.db
 data/memory.db-*
+data/todos.db
+data/todos.db-*
 test.txt
 /*.pdf

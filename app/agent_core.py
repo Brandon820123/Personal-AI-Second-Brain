@@ -3,10 +3,18 @@
 import json
 import logging
 import re
+import secrets
 
 import requests
 
 try:
+    from .action_tools import (
+        complete_todo_action,
+        create_note,
+        create_todo_action,
+        list_todos_action,
+        update_memory_action,
+    )
     from .embeddings import generate_query_embedding
     from .file_scanner import load_scanner_config, scan_folder
     from .knowledge_library import list_documents
@@ -18,6 +26,7 @@ try:
     )
     from .tool_registry import (
         ToolArgumentError,
+        ToolConfirmationRequiredError,
         ToolExecutionError,
         ToolNotFoundError,
         ToolRegistry,
@@ -25,6 +34,13 @@ try:
     )
     from .vector_store import VectorStore
 except ImportError:
+    from action_tools import (
+        complete_todo_action,
+        create_note,
+        create_todo_action,
+        list_todos_action,
+        update_memory_action,
+    )
     from embeddings import generate_query_embedding
     from file_scanner import load_scanner_config, scan_folder
     from knowledge_library import list_documents
@@ -36,6 +52,7 @@ except ImportError:
     )
     from tool_registry import (
         ToolArgumentError,
+        ToolConfirmationRequiredError,
         ToolExecutionError,
         ToolNotFoundError,
         ToolRegistry,
@@ -53,13 +70,17 @@ LOGGER = logging.getLogger(__name__)
 
 _AGENT_TARGET_PATTERN = re.compile(
     r"(?:知识库|知识来源|已索引(?:文件|文档)|项目历史|长期记忆|记忆中|"
+    r"记住|记忆|笔记|便签|待办|任务清单|"
     r"knowledge base|knowledge sources?|indexed (?:files?|documents?)|"
-    r"project history|search memory|what do you remember)",
+    r"project history|search memory|what do you remember|memories?|"
+    r"notes?|to-?dos?|task list)",
     re.IGNORECASE,
 )
 _AGENT_ACTION_PATTERN = re.compile(
     r"(?:搜索|查找|查询|检索|列出|查看|扫描|哪些|什么|回忆|历史|进度|"
-    r"\b(?:search|find|query|list|show|scan|which|what|history|progress)\b)",
+    r"创建|新建|添加|保存|写入|更新|修改|完成|记住|"
+    r"\b(?:search|find|query|list|show|scan|which|what|history|progress|"
+    r"create|add|save|write|update|edit|complete|remember)\b)",
     re.IGNORECASE,
 )
 _AGENT_CONTEXT_HEADER = (
@@ -77,6 +98,10 @@ class AgentCoreError(RuntimeError):
 
 class AgentPlanningError(AgentCoreError):
     """Raised when the model does not return a valid structured decision."""
+
+
+class AgentConfirmationError(AgentCoreError):
+    """Raised when a pending action cannot be resolved safely."""
 
 
 class OllamaDecisionPlanner:
@@ -101,6 +126,9 @@ class OllamaDecisionPlanner:
                     "object matching that tool's parameters. Use null with an "
                     "empty arguments object when no tool or no further tool is "
                     "needed. Never answer the user and never invent a tool.\n"
+                    "Tool permission fields are enforced by the host. Select a "
+                    "writable tool when needed, but never claim it was executed "
+                    "or confirmed.\n"
                     f"Registered tools: {tool_catalog}"
                 ),
             },
@@ -166,6 +194,7 @@ class AgentCore:
         self.registry = registry or build_default_tool_registry()
         self.planner = planner or OllamaDecisionPlanner()
         self.max_tool_calls = max_tool_calls
+        self._pending_actions = {}
 
     def run(self, user_request):
         """Plan and execute up to three tools, returning bounded model context."""
@@ -173,9 +202,11 @@ class AgentCore:
             raise ValueError("Agent request must be non-empty text.")
 
         request = user_request.strip()
+        self._pending_actions.clear()
         tool_calls = []
         error_message = None
         limit_reached = False
+        pending_confirmation = None
 
         for call_index in range(self.max_tool_calls):
             try:
@@ -195,6 +226,29 @@ class AgentCore:
 
             LOGGER.debug("Tool selected -> %s", tool_name)
             record = {"tool": tool_name, "arguments": arguments}
+            try:
+                metadata = self.registry.validate_tool_call(tool_name, arguments)
+            except (ToolArgumentError, ToolNotFoundError) as error:
+                record.update({"status": "rejected", "error": str(error)})
+                tool_calls.append(record)
+                error_message = str(error)
+                LOGGER.debug("Tool result -> rejected | %s", error_message)
+                break
+
+            if metadata["requires_confirmation"]:
+                pending_confirmation = self._create_pending_action(
+                    tool_name,
+                    arguments,
+                    metadata["description"],
+                )
+                record.update({
+                    "status": "pending_confirmation",
+                    "confirmation_id": pending_confirmation["confirmation_id"],
+                })
+                tool_calls.append(record)
+                LOGGER.debug("Tool result -> pending confirmation | %s", tool_name)
+                break
+
             try:
                 raw_result = self.registry.execute_tool(tool_name, arguments)
                 result = _bounded_json_value(raw_result)
@@ -229,7 +283,64 @@ class AgentCore:
             "context": context,
             "limit_reached": limit_reached,
             "error": error_message,
+            "pending_confirmation": pending_confirmation,
         }
+
+    def confirm_action(self, confirmation_id, approved):
+        """Resolve one frozen pending action exactly once."""
+        if not isinstance(confirmation_id, str) or not confirmation_id.strip():
+            raise AgentConfirmationError("Confirmation ID must be non-empty text.")
+        if type(approved) is not bool:
+            raise AgentConfirmationError(
+                "Confirmation approval must be an explicit boolean value."
+            )
+
+        pending = self._pending_actions.pop(confirmation_id, None)
+        if pending is None:
+            raise AgentConfirmationError(
+                "The pending Agent action is missing, expired, or already resolved."
+            )
+
+        record = {
+            "tool": pending["tool"],
+            "arguments": pending["arguments"],
+        }
+        if not approved:
+            record["status"] = "cancelled"
+            LOGGER.debug("Tool result -> cancelled | %s", pending["tool"])
+            return _agent_result([record])
+
+        LOGGER.debug("Tool confirmed -> %s", pending["tool"])
+        try:
+            raw_result = self.registry.execute_tool(
+                pending["tool"],
+                pending["arguments"],
+                confirmed=True,
+            )
+            result = _bounded_json_value(raw_result)
+        except (ToolRegistryError, ValueError) as error:
+            record.update({"status": "error", "error": str(error)})
+            LOGGER.debug("Tool result -> error | %s", error)
+            return _agent_result([record], error_message=str(error))
+
+        record.update({"status": "ok", "result": result})
+        LOGGER.debug(
+            "Tool result -> %s | %s",
+            pending["tool"],
+            _log_preview(result),
+        )
+        return _agent_result([record])
+
+    def _create_pending_action(self, tool_name, arguments, description):
+        confirmation_id = secrets.token_urlsafe(24)
+        pending = {
+            "confirmation_id": confirmation_id,
+            "tool": tool_name,
+            "arguments": json.loads(json.dumps(arguments, ensure_ascii=False)),
+            "description": description,
+        }
+        self._pending_actions[confirmation_id] = pending
+        return dict(pending)
 
     def _decide(self, user_request, history):
         tools = self.registry.get_tools()
@@ -276,7 +387,7 @@ def should_use_agent(user_request):
 
 
 def build_default_tool_registry():
-    """Create the Phase 10A registry containing only approved read operations."""
+    """Create the approved Phase 10 read and confirmed-write tool registry."""
     registry = ToolRegistry()
     registry.register_tool(
         "search_knowledge",
@@ -312,6 +423,123 @@ def build_default_tool_registry():
             "additionalProperties": False,
         },
         _list_knowledge_files,
+    )
+    registry.register_tool(
+        "create_note",
+        "Create a new Markdown note inside the approved local data/notes folder.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10000,
+                },
+                "filename": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                },
+            },
+            "required": ["title", "content"],
+            "additionalProperties": False,
+        },
+        create_note,
+        read_only=False,
+        requires_confirmation=True,
+    )
+    registry.register_tool(
+        "update_memory",
+        "Add a local Memory or update the record identified by memory_id.",
+        {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000,
+                },
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["personal", "project", "conversation"],
+                },
+                "importance": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                },
+                "memory_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                },
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        update_memory_action,
+        read_only=False,
+        requires_confirmation=True,
+    )
+    registry.register_tool(
+        "create_todo",
+        "Create a pending todo in the approved local todo database.",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 300},
+                "description": {
+                    "type": "string",
+                    "maxLength": 4000,
+                },
+            },
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+        create_todo_action,
+        read_only=False,
+        requires_confirmation=True,
+    )
+    registry.register_tool(
+        "list_todos",
+        "List local pending, completed, or all todos.",
+        {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["all", "pending", "completed"],
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        list_todos_action,
+    )
+    registry.register_tool(
+        "complete_todo",
+        "Mark one local todo as completed by its exact ID.",
+        {
+            "type": "object",
+            "properties": {
+                "todo_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                },
+            },
+            "required": ["todo_id"],
+            "additionalProperties": False,
+        },
+        complete_todo_action,
+        read_only=False,
+        requires_confirmation=True,
     )
     return registry
 
@@ -461,6 +689,16 @@ def _format_agent_context(tool_calls, error_message):
             ensure_ascii=False,
         )
     return f"{_AGENT_CONTEXT_HEADER}{payload}{_AGENT_CONTEXT_FOOTER}"
+
+
+def _agent_result(tool_calls, error_message=None):
+    return {
+        "tool_calls": tool_calls,
+        "context": _format_agent_context(tool_calls, error_message),
+        "limit_reached": False,
+        "error": error_message,
+        "pending_confirmation": None,
+    }
 
 
 def _log_preview(result):

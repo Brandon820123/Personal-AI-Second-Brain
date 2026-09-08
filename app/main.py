@@ -81,12 +81,33 @@ def stream_response(
     }
     if use_memory:
         request_data["messages"][-1:-1] = prepare_memory_messages(
-            user_message, memory_manager,
+            user_message,
+            memory_manager,
+            capture=not should_use_agent(user_message),
         )
     active_agent = None
+    confirmed_agent_action = False
     if use_memory and should_use_agent(user_message):
         active_agent = agent_core or AgentCore()
         agent_result = active_agent.run(user_message)
+        pending = agent_result["pending_confirmation"]
+        if pending is not None:
+            print("\nAgent requests confirmation for a local write action:")
+            print(f"Tool: {pending['tool']}")
+            print(
+                "Arguments: "
+                f"{json.dumps(pending['arguments'], ensure_ascii=False)}"
+            )
+            confirmation = input("Type YES to confirm: ").strip()
+            approved = confirmation == "YES"
+            agent_result = active_agent.confirm_action(
+                pending["confirmation_id"],
+                approved,
+            )
+            if not approved:
+                print("Agent action cancelled. No local data was changed.")
+                return
+            confirmed_agent_action = True
         if agent_result["context"]:
             request_data["messages"][-1:-1] = [{
                 "role": "system",
@@ -138,7 +159,7 @@ def stream_response(
                 print()
                 if active_agent is not None:
                     active_agent.log_final_response()
-                if use_memory:
+                if use_memory and not confirmed_agent_action:
                     finalize_chat_memory(user_message, memory_manager)
             else:
                 print("Ollama returned an empty response.")

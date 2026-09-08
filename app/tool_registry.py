@@ -26,13 +26,26 @@ class ToolExecutionError(ToolRegistryError):
     """Wrap an exception raised inside an approved tool callable."""
 
 
+class ToolConfirmationRequiredError(ToolRegistryError):
+    """Raised when a protected tool is executed without explicit approval."""
+
+
 class ToolRegistry:
     """Keep tool metadata separate from callables and validate every call."""
 
     def __init__(self):
         self._tools = {}
 
-    def register_tool(self, name, description, parameters, tool_callable):
+    def register_tool(
+        self,
+        name,
+        description,
+        parameters,
+        tool_callable,
+        *,
+        read_only=True,
+        requires_confirmation=False,
+    ):
         """Register one named callable with a strict JSON-style object schema."""
         if not isinstance(name, str) or not _TOOL_NAME_PATTERN.fullmatch(name):
             raise ValueError(
@@ -44,6 +57,12 @@ class ToolRegistry:
             raise ValueError("Tool description must be non-empty text.")
         if not callable(tool_callable):
             raise ValueError("Tool callable must be callable.")
+        if type(read_only) is not bool or type(requires_confirmation) is not bool:
+            raise ValueError("Tool permission flags must be boolean values.")
+        if read_only and requires_confirmation:
+            raise ValueError("A read-only tool cannot require write confirmation.")
+        if not read_only and not requires_confirmation:
+            raise ValueError("Every writable tool must require confirmation.")
 
         schema = copy.deepcopy(parameters)
         _validate_schema_definition(schema, path="parameters")
@@ -57,6 +76,8 @@ class ToolRegistry:
             "description": description.strip(),
             "parameters": schema,
             "callable": tool_callable,
+            "read_only": read_only,
+            "requires_confirmation": requires_confirmation,
         }
         return self.get_tool(name)
 
@@ -69,8 +90,8 @@ class ToolRegistry:
         """Return serializable tool descriptions in registration order."""
         return [_public_tool(record) for record in self._tools.values()]
 
-    def execute_tool(self, name, arguments):
-        """Validate structured arguments before invoking a registered callable."""
+    def validate_tool_call(self, name, arguments):
+        """Validate one proposed call and return its public permissions."""
         if not isinstance(name, str) or name not in self._tools:
             raise ToolNotFoundError(f"Tool '{name}' is not registered.")
         if not isinstance(arguments, dict):
@@ -78,6 +99,21 @@ class ToolRegistry:
 
         record = self._tools[name]
         _validate_value(arguments, record["parameters"], path="arguments")
+        return _public_tool(record)
+
+    def execute_tool(self, name, arguments, *, confirmed=False):
+        """Validate permissions and invoke an explicitly registered callable."""
+        metadata = self.validate_tool_call(name, arguments)
+        if type(confirmed) is not bool:
+            raise ToolConfirmationRequiredError(
+                "Tool confirmation must be an explicit boolean value."
+            )
+        if metadata["requires_confirmation"] and not confirmed:
+            raise ToolConfirmationRequiredError(
+                f"Tool '{name}' requires explicit confirmation."
+            )
+
+        record = self._tools[name]
         try:
             return record["callable"](**arguments)
         except ToolRegistryError:
@@ -93,6 +129,8 @@ def _public_tool(record):
         "name": record["name"],
         "description": record["description"],
         "parameters": copy.deepcopy(record["parameters"]),
+        "read_only": record["read_only"],
+        "requires_confirmation": record["requires_confirmation"],
     }
 
 
@@ -181,10 +219,23 @@ def _validate_value(value, schema, path):
 _DEFAULT_REGISTRY = ToolRegistry()
 
 
-def register_tool(name, description, parameters, tool_callable):
+def register_tool(
+    name,
+    description,
+    parameters,
+    tool_callable,
+    *,
+    read_only=True,
+    requires_confirmation=False,
+):
     """Register a tool in the module-level registry."""
     return _DEFAULT_REGISTRY.register_tool(
-        name, description, parameters, tool_callable,
+        name,
+        description,
+        parameters,
+        tool_callable,
+        read_only=read_only,
+        requires_confirmation=requires_confirmation,
     )
 
 
@@ -193,6 +244,10 @@ def get_tools():
     return _DEFAULT_REGISTRY.get_tools()
 
 
-def execute_tool(name, arguments):
+def execute_tool(name, arguments, *, confirmed=False):
     """Execute a tool from the module-level registry."""
-    return _DEFAULT_REGISTRY.execute_tool(name, arguments)
+    return _DEFAULT_REGISTRY.execute_tool(
+        name,
+        arguments,
+        confirmed=confirmed,
+    )
