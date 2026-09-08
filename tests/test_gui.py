@@ -54,7 +54,11 @@ class GuiSmokeTests(unittest.TestCase):
         gc.collect()
 
     def test_window_has_all_pages_and_textbook_row(self):
-        self.assertEqual(self.window.pages.count(), 4)
+        self.assertEqual(self.window.pages.count(), 5)
+        navigation_labels = [
+            button.text() for button in self.window.navigation_group.buttons()
+        ]
+        self.assertIn("Memory", navigation_labels)
         self.assertEqual(self.window.knowledge_table.rowCount(), 1)
         self.assertEqual(self.window.knowledge_table.item(0, 0).text(), "Textbook.pdf")
         self.assertEqual(self.window.knowledge_table.item(0, 2).text(), "1620")

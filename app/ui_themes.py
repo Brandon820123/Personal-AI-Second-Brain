@@ -304,12 +304,12 @@ def build_stylesheet(theme):
             border-radius: {radius}px;
             padding: 8px 10px;
         }}
-        #sourceSummaryCard {{
+        #sourceSummaryCard, #memorySummaryCard {{
             background: {theme['surface']};
             border: 1px solid {theme['border']};
             border-radius: {radius}px;
         }}
-        #sourceSummaryValue {{
+        #sourceSummaryValue, #memorySummaryValue {{
             color: {theme['accent_bright']};
             font-size: 18px;
             font-weight: 700;
@@ -321,7 +321,8 @@ def build_stylesheet(theme):
             font-size: 11px;
         }}
         #sourceRemoveButton {{ padding: 5px 9px; }}
-        QPlainTextEdit, QLineEdit, QComboBox {{
+        QDialog {{ background: {theme['background']}; }}
+        QPlainTextEdit, QLineEdit, QComboBox, QSpinBox {{
             background: {theme['surface']};
             border: 1px solid {theme['border']};
             border-radius: {radius}px;
@@ -350,6 +351,8 @@ def build_stylesheet(theme):
         }}
         QTableWidget::item {{ padding: 8px; }}
         QTableWidget::item:selected {{ background: {theme['accent_deep']}; }}
+        #dangerButton {{ color: {theme['error']}; }}
+        #memoryDialogError {{ color: {theme['error']}; }}
         QRadioButton {{
             font-size: 17px;
             font-weight: 650;

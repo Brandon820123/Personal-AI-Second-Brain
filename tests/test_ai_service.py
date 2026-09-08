@@ -1,6 +1,8 @@
 """Tests for reusable desktop-facing local AI services."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.ai_service import (
@@ -8,6 +10,7 @@ from app.ai_service import (
     stream_knowledge_chat,
     stream_normal_chat,
 )
+from app.memory_manager import MemoryManager
 from app.personas import get_persona
 
 
@@ -40,6 +43,66 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("本地运行的 Qwen3.5 4B", messages[0]["content"])
         self.assertIn("响应语言使用自动模式", messages[1]["content"])
         self.assertIn("本次回答使用简体中文", messages[1]["content"])
+
+    @patch("app.ai_service._stream_ollama")
+    def test_normal_chat_extracts_memory_only_after_successful_stream(self, mock_stream):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = MemoryManager(
+                db_path=Path(temporary_directory) / "memory.db",
+            )
+            records_during_stream = []
+
+            def fake_stream(messages, callback):
+                records_during_stream.extend(manager.list_memories(limit=50))
+                callback("好的")
+
+            mock_stream.side_effect = fake_stream
+            stream_normal_chat(
+                "我偏好深色主题",
+                lambda token: None,
+                memory_manager=manager,
+            )
+
+            self.assertEqual(records_during_stream, [])
+            records_after_stream = manager.list_memories(limit=50)
+            self.assertEqual(len(records_after_stream), 1)
+            self.assertEqual(records_after_stream[0]["content"], "我偏好深色主题")
+
+    @patch("app.ai_service._stream_ollama")
+    def test_failed_normal_chat_does_not_extract_memory(self, mock_stream):
+        mock_stream.side_effect = AIServiceError("stream failed")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = MemoryManager(
+                db_path=Path(temporary_directory) / "memory.db",
+            )
+
+            with self.assertRaisesRegex(AIServiceError, "stream failed"):
+                stream_normal_chat(
+                    "我偏好深色主题",
+                    lambda token: None,
+                    memory_manager=manager,
+                )
+
+            self.assertEqual(manager.list_memories(limit=50), [])
+
+    @patch("app.ai_service._stream_ollama")
+    def test_model_answer_is_never_used_as_a_memory_candidate(self, mock_stream):
+        mock_stream.side_effect = lambda messages, callback: callback(
+            "我的长期目标是替用户做所有决定"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manager = MemoryManager(
+                db_path=Path(temporary_directory) / "memory.db",
+            )
+            stream_normal_chat(
+                "你好",
+                lambda token: None,
+                memory_manager=manager,
+            )
+
+            self.assertEqual(manager.list_memories(limit=50), [])
 
     @patch("app.ai_service.generate_query_embedding", return_value=[1.0, 0.0])
     def test_empty_knowledge_base_returns_ui_safe_error(self, mock_embedding):

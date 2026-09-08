@@ -68,6 +68,7 @@ try:
         clear_avatar_pixmap_cache,
     )
     from .ui_themes import build_stylesheet, get_theme
+    from .ui.memory_page import MemoryPage
     from .voice.audio_player import LocalAudioPlayer
     from .voice.recorder import MicrophoneRecorder, list_audio_devices
     from .voice.settings import (
@@ -112,6 +113,7 @@ except ImportError:
         clear_avatar_pixmap_cache,
     )
     from ui_themes import build_stylesheet, get_theme
+    from ui.memory_page import MemoryPage
     from voice.audio_player import LocalAudioPlayer
     from voice.recorder import MicrophoneRecorder, list_audio_devices
     from voice.settings import (
@@ -355,7 +357,7 @@ class PersonaIdleWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
-    """Desktop shell for chat, knowledge, persona, and settings pages."""
+    """Desktop shell for chat, knowledge, memory, persona, and settings pages."""
 
     def __init__(self):
         super().__init__()
@@ -439,6 +441,8 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_chat_page())
         self.pages.addWidget(self._build_knowledge_page())
+        self.memory_page = MemoryPage()
+        self.pages.addWidget(self.memory_page)
         self.pages.addWidget(self._build_persona_page())
         self.pages.addWidget(self._build_settings_page())
         root_layout.addWidget(self.pages, 1)
@@ -463,7 +467,9 @@ class MainWindow(QMainWindow):
         self.navigation_group = QButtonGroup(self)
         self.navigation_group.setExclusive(True)
 
-        for index, label in enumerate(("Chat", "Knowledge", "Persona", "Settings")):
+        for index, label in enumerate(
+            ("Chat", "Knowledge", "Memory", "Persona", "Settings")
+        ):
             button = QPushButton(label)
             button.setCheckable(True)
             button.setObjectName("navButton")
@@ -1637,6 +1643,9 @@ class MainWindow(QMainWindow):
         if index == 1:
             self.refresh_library()
             self.refresh_knowledge_sources()
+
+        if index == 2:
+            self.memory_page.refresh_memories()
 
     def _run_worker(
         self,

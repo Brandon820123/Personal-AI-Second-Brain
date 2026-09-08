@@ -5,6 +5,7 @@ import sys
 
 import requests
 
+from agent_core import AgentCore, should_use_agent
 from chunker import chunk_document_pages
 from document_loader import load_document, load_document_pages
 from document_importer import (
@@ -23,7 +24,7 @@ from language_preferences import (
     build_language_instruction,
     get_language_preference,
 )
-from memory_manager import prepare_memory_messages
+from memory_manager import finalize_chat_memory, prepare_memory_messages
 from personas import (
     build_persona_instruction,
     get_active_persona,
@@ -49,7 +50,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def stream_response(
-    user_message, persona=None, language=None, memory_manager=None, use_memory=True,
+    user_message,
+    persona=None,
+    language=None,
+    memory_manager=None,
+    use_memory=True,
+    agent_core=None,
 ):
     """Send one message to local Ollama and print its streamed response."""
     selected_persona = persona or get_active_persona()
@@ -77,6 +83,15 @@ def stream_response(
         request_data["messages"][-1:-1] = prepare_memory_messages(
             user_message, memory_manager,
         )
+    active_agent = None
+    if use_memory and should_use_agent(user_message):
+        active_agent = agent_core or AgentCore()
+        agent_result = active_agent.run(user_message)
+        if agent_result["context"]:
+            request_data["messages"][-1:-1] = [{
+                "role": "system",
+                "content": agent_result["context"],
+            }]
 
     try:
         with requests.post(
@@ -121,6 +136,10 @@ def stream_response(
 
             if answer_started:
                 print()
+                if active_agent is not None:
+                    active_agent.log_final_response()
+                if use_memory:
+                    finalize_chat_memory(user_message, memory_manager)
             else:
                 print("Ollama returned an empty response.")
     except requests.exceptions.ConnectionError:

@@ -128,8 +128,11 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.update_memory(memory["id"], importance=4))
         self.assertEqual(self.store.search_memories("Atlas"), [])
 
-        with sqlite3.connect(self.db_path) as connection:
+        connection = sqlite3.connect(self.db_path)
+        try:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM memory_terms").fetchone()[0], 0)
+        finally:
+            connection.close()
 
     def test_relevance_ranks_before_importance_and_importance_breaks_ties(self):
         detailed = self.store.add_memory("Atlas Python SQLite", "project", 1)

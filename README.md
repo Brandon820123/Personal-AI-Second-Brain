@@ -209,17 +209,16 @@ page = memory.list_memories(memory_type="project", limit=20, offset=0)
 deleted = memory.delete_memory(record["id"])
 ```
 
-Normal chat only captures a leading, explicit remember command, for example
+An explicit remember command is captured immediately before normal chat, for example
 `请记住：我长期使用 Python 开发后端。`,
 `请记住：[project] Atlas 项目决定使用 SQLite。`, or
 `Please remember [conversation]: We agreed to review Atlas milestones weekly.`
 The optional tags are `personal`, `project`, and `conversation`; Chinese prefixes
 `个人：`, `项目：`, and `对话摘要：` are also accepted. Untagged requests use
-`personal`, importance 4, and source `chat:user`. Ordinary statements, quoted
-commands, recall questions, empty requests, and oversized requests are not
-automatically saved. There is no automatic archive of user messages, model
-answers, imported documents, or all conversations. Deliberate summaries and
-project notes can always be supplied through the backend API.
+`personal`, importance 4, and source `chat:user`. Empty, interrogative, and
+oversized remember requests are rejected. Phase 9C adds conservative automatic
+selection for other long-term statements; it still does not archive all user
+messages, model answers, imported documents, or conversations.
 
 On each normal-chat message, the manager first handles any explicit save request
 and then retrieves relevant memory. Both desktop and CLI RAG retrieve from the
@@ -254,12 +253,131 @@ Run the Memory tests and the full regression suite with:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-For Phase 9B, a Memory GUI can call `list_memories()` for pagination/type filters,
-`search_memories()` for relevant results, and the existing CRUD methods for
-add/edit/delete forms. Run these operations in the existing Qt worker mechanism,
-surface `ValueError`/`MemoryStoreError` in the UI, and refresh the displayed page
-after successful writes. Future automatic summary suggestions should be reviewed
-before calling `add_memory()`; no GUI or summary-generation model is part of 9A.
+## Phase 9B: Memory Management GUI
+
+The desktop sidebar includes a **Memory** page implemented by the reusable
+`MemoryPage` widget in `app/ui/memory_page.py`. Four summary cards show total,
+Personal, Project, and Conversation counts. The page loads all records through
+bounded `list_memories()` pages, so statistics and the scrollable table are not
+limited to the first database page. Each row displays content, type, importance,
+local display time for `updated_at`, and source.
+
+The search field calls the existing `search_memories()` interface and can be
+combined with the All, Personal, Project, or Conversation filter. An empty search
+uses the records already loaded through `list_memories()`. Search results retain
+the Memory v1 limit of 50 matches.
+
+**＋ 添加记忆** opens a modal editor for content, type, and importance, then calls
+`add_memory()` with source `gui:manual`. Selecting a row enables Edit and Delete;
+double-clicking also opens Edit. Edits preserve the record source and call
+`update_memory()`. Delete requires a confirmation dialog before calling
+`delete_memory()`. Every successful write reloads both the complete statistics and
+the active filtered view. Read failures stay on the page as a friendly status;
+write failures use a short warning dialog without exposing internal paths or a
+traceback.
+
+The page uses the existing Persona-aware dark stylesheet but contains no avatar
+or animation. Entering it from the sidebar refreshes the database view. Chat,
+RAG, Ollama, Persona behavior, ChromaDB, Scanner, Supabase, and Voice are not part
+of its CRUD path.
+
+Automatic extraction and consolidation remain outside the Memory page's CRUD
+responsibilities and are described in Phase 9C.
+
+## Phase 9C: Automatic Memory Extraction and Deduplication
+
+After a successful normal-chat response, `app/memory_manager.py` evaluates the
+user message for at most one strong long-term candidate. It recognizes durable
+preferences and habits, long-term goals, explicit project decisions and status,
+and clearly marked important conversation conclusions. Questions, greetings,
+thanks, weather chat, temporary emotions or plans, short fragments, and text
+presented as an AI/assistant answer are rejected. Only the user message is
+evaluated; generated model text is never stored as Memory.
+
+Each candidate carries an in-process `confidence` value and reason. Automatic
+candidates require confidence **0.80** or higher, while leading explicit remember
+commands use confidence 1.0 and save directly through the same consolidation
+path. Confidence is decision metadata rather than a new SQLite column, so the
+Phase 9A schema and Memory GUI remain compatible. Importance is assigned by
+long-term value: goals use 5, preferences/habits/project state use 4, and an
+important conversation conclusion uses 3. Automatic records use source
+`chat:auto`; explicit requests keep `chat:user`.
+
+Before writing, the manager searches up to 20 same-type memories. Normalized
+content, sequence similarity, and lexical overlap suppress equivalent wording.
+For project records, shared subject terms connect states such as planned, in
+progress, blocked, and completed. A newer status updates the existing row and its
+search terms while preserving its ID and creation time. A stale progress message
+cannot replace a completed status. The resulting decision is one of `rejected`,
+`added`, `updated`, or `duplicate`.
+
+Desktop and CLI normal chat run automatic extraction only after Ollama has
+returned response text. A failed or empty stream does not create an automatic
+memory. Explicit remember commands are handled before generation so the assistant
+can report a save failure honestly, then skipped by the post-chat pass. RAG,
+document summarization, Persona, ChromaDB, Scanner, Supabase, Voice, and the
+Memory page do not enter the extraction path.
+
+Every decision emits a module-level DEBUG message in the form
+`Memory candidate -> <decision>`. Normal GUI operation does not enable DEBUG
+logging, so these diagnostics remain available to developers without appearing
+in the interface.
+
+## Phase 10A: Agent Core v1
+
+`app/tool_registry.py` provides an allowlist-based Tool Registry. Each tool has a
+name, description, JSON-style parameter schema, and private Python callable.
+Callables are never included in the serializable catalog returned to the model.
+The registry rejects duplicate or malformed registrations, unknown tools,
+missing or extra arguments, wrong JSON value types, invalid enum values, and
+values outside declared limits before invoking a callable. Tool failures are
+wrapped as controlled execution errors.
+
+`app/agent_core.py` adds a bounded orchestration loop:
+
+```text
+user request
+    -> local-data route guard
+    -> Ollama JSON tool decision
+    -> strict registry validation
+    -> read-only tool execution (maximum 3 calls)
+    -> bounded tool-result context
+    -> existing Persona/language/Memory prompt
+    -> existing Ollama response stream
+```
+
+The route guard bypasses Agent planning for ordinary chat. Clear requests to
+search local knowledge, inspect indexed files or sources, or recall project and
+long-term history use the local `qwen3.5:4b` model as a tool router. Each decision
+must be exactly `{"tool": <registered-name-or-null>, "arguments": {...}}` and is
+parsed as JSON; there is no natural-language tool-call parser. The model may stop
+with a null tool, and the loop cannot execute more than three tools.
+
+Phase 10A registers only these tools:
+
+| Tool | Existing interface used | Behavior |
+| --- | --- | --- |
+| `search_knowledge` | Embeddings, `VectorStore.search()`, RAG filtering | Returns a small set of relevant indexed chunks and source labels |
+| `search_memory` | `MemoryManager.search_memories()` | Returns bounded Personal, Project, or Conversation matches |
+| `scan_knowledge_sources` | Scanner config and `scan_folder()` | Reads configured folders with `save_index=False` |
+| `list_knowledge_files` | `knowledge_library.list_documents()` | Lists bounded metadata for already indexed files |
+
+No file deletion, system-file mutation, shell, PowerShell, or arbitrary command
+tool is registered. Results are JSON-bounded and enclosed in a clearly marked,
+untrusted system-context block after the active Persona and language instructions
+and before the user message. The final answer still uses the existing response
+stream, so Fairy and Delamain retain their identity and style. A rejected call,
+planner failure, or tool exception becomes result context and does not stop the
+final response.
+
+Agent decisions, selected tools, tool results, and final-response completion use
+module-level DEBUG logging. The desktop GUI does not enable these logs. Run the
+focused Agent tests or complete regression suite with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_tool_registry tests.test_agent_core -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
 ## Persona Avatar Assets
 

@@ -5,6 +5,7 @@ import json
 import requests
 
 try:
+    from .agent_core import AgentCore, should_use_agent
     from .chunker import chunk_document_pages
     from .document_importer import import_document_chunks
     from .document_loader import load_document_pages
@@ -14,7 +15,7 @@ try:
         build_language_instruction,
         get_language_preference,
     )
-    from .memory_manager import prepare_memory_messages
+    from .memory_manager import finalize_chat_memory, prepare_memory_messages
     from .personas import build_persona_instruction, get_active_persona
     from .rag import (
         DEFAULT_TOP_K,
@@ -26,6 +27,7 @@ try:
     )
     from .vector_store import VectorStore
 except ImportError:
+    from agent_core import AgentCore, should_use_agent
     from chunker import chunk_document_pages
     from document_importer import import_document_chunks
     from document_loader import load_document_pages
@@ -35,7 +37,7 @@ except ImportError:
         build_language_instruction,
         get_language_preference,
     )
-    from memory_manager import prepare_memory_messages
+    from memory_manager import finalize_chat_memory, prepare_memory_messages
     from personas import build_persona_instruction, get_active_persona
     from rag import (
         DEFAULT_TOP_K,
@@ -140,6 +142,7 @@ def stream_normal_chat(
     language=None,
     on_state=lambda state: None,
     memory_manager=None,
+    agent_core=None,
 ):
     """Stream a persona-styled normal-chat response locally."""
     if not isinstance(message, str) or not message.strip():
@@ -159,8 +162,21 @@ def stream_normal_chat(
         {"role": "user", "content": message.strip()},
     ]
     messages[-1:-1] = prepare_memory_messages(message, memory_manager)
+    active_agent = None
+    if should_use_agent(message):
+        active_agent = agent_core or AgentCore()
+        on_state("searching")
+        agent_result = active_agent.run(message)
+        if agent_result["context"]:
+            messages[-1:-1] = [{
+                "role": "system",
+                "content": agent_result["context"],
+            }]
     on_state("thinking")
     _stream_ollama(messages, on_token)
+    if active_agent is not None:
+        active_agent.log_final_response()
+    finalize_chat_memory(message, memory_manager)
 
 
 def stream_knowledge_chat(
