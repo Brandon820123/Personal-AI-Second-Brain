@@ -1,13 +1,14 @@
 """PySide6 desktop interface for the local Private Personal AI."""
 
 import json
+import importlib
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QLineF, QPointF, QRectF, QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QLineF, QPointF, QRectF, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -37,20 +38,10 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from .agent_core import AgentCore
-    from .ai_service import (
-        check_ollama,
-        import_document,
-        reindex_library_document,
-        stream_confirmed_agent_action,
-        stream_knowledge_chat,
-        stream_normal_chat,
-    )
+    from .conversation_store import ConversationStore
     from .cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
-    from .knowledge_library import delete_document, list_documents
-    from .knowledge_sync import sync_new_documents
     from .language_preferences import get_language_preference, infer_response_language
-    from .personas import get_active_persona, list_personas, switch_persona
+    from .personas import get_active_persona, get_persona, list_personas, switch_persona
     from .file_scanner import (
         DEFAULT_CONFIG_PATH as SCANNER_CONFIG_PATH,
         DEFAULT_INDEX_PATH as FILE_INDEX_PATH,
@@ -84,20 +75,10 @@ try:
     from .voice.streaming import StreamingSentenceSegmenter, ThreadedSpeechQueue
     from .voice.tts import LocalPiperTextToSpeech
 except ImportError:
-    from agent_core import AgentCore
-    from ai_service import (
-        check_ollama,
-        import_document,
-        reindex_library_document,
-        stream_confirmed_agent_action,
-        stream_knowledge_chat,
-        stream_normal_chat,
-    )
+    from conversation_store import ConversationStore
     from cloud_storage import DEFAULT_CACHE_ROOT, sync_cloud_cache
-    from knowledge_library import delete_document, list_documents
-    from knowledge_sync import sync_new_documents
     from language_preferences import get_language_preference, infer_response_language
-    from personas import get_active_persona, list_personas, switch_persona
+    from personas import get_active_persona, get_persona, list_personas, switch_persona
     from file_scanner import (
         DEFAULT_CONFIG_PATH as SCANNER_CONFIG_PATH,
         DEFAULT_INDEX_PATH as FILE_INDEX_PATH,
@@ -134,6 +115,53 @@ except ImportError:
 
 APP_TITLE = "Private Personal AI"
 DOCUMENT_FILTER = "Documents (*.txt *.md *.pdf *.docx)"
+
+
+def _lazy_operation(module_name, name):
+    """Keep heavy AI imports inside the worker that first uses them."""
+    def invoke(*args, **kwargs):
+        module = importlib.import_module(
+            f".{module_name}" if __package__ else module_name, package=__package__,
+        )
+        return getattr(module, name)(*args, **kwargs)
+    return invoke
+
+
+AgentCore = _lazy_operation("agent_core", "AgentCore")
+check_ollama = _lazy_operation("ai_service", "check_ollama")
+import_document = _lazy_operation("ai_service", "import_document")
+reindex_library_document = _lazy_operation("ai_service", "reindex_library_document")
+stream_normal_chat = _lazy_operation("ai_service", "stream_normal_chat")
+stream_knowledge_chat = _lazy_operation("ai_service", "stream_knowledge_chat")
+stream_confirmed_agent_action = _lazy_operation("ai_service", "stream_confirmed_agent_action")
+list_documents = _lazy_operation("knowledge_library", "list_documents")
+delete_document = _lazy_operation("knowledge_library", "delete_document")
+sync_new_documents = _lazy_operation("knowledge_sync", "sync_new_documents")
+
+
+def run_persisted_chat(store, conversation_id, operation, message, *args,
+                       save_user=True, conversation_context=None, on_token, **kwargs):
+    """Persist on the chat worker; failed/partial responses never become history."""
+    context = conversation_context
+    if context is None:
+        context = store.context(conversation_id)
+    if save_user:
+        store.append(conversation_id, "user", message, kwargs["persona"]["id"])
+    if operation is stream_normal_chat and kwargs.get("agent_core") is None:
+        kwargs["agent_core"] = AgentCore()
+    tokens = []
+
+    def receive(token):
+        tokens.append(token)
+        on_token(token)
+
+    result = operation(message, *args, on_token=receive,
+                       conversation_context=context, **kwargs)
+    if isinstance(result, dict) and result.get("pending_confirmation") is not None:
+        result = dict(result, _agent_core=kwargs.get("agent_core"), _conversation_context=context)
+    if tokens:
+        store.append(conversation_id, "assistant", "".join(tokens))
+    return result
 
 
 def scan_authorized_sources(
@@ -364,8 +392,15 @@ class PersonaIdleWidget(QWidget):
 class MainWindow(QMainWindow):
     """Desktop shell for chat, knowledge, memory, persona, and settings pages."""
 
-    def __init__(self):
+    def __init__(self, conversation_store=None):
         super().__init__()
+        self.conversation_store = conversation_store or ConversationStore()
+        self.conversation_id = None
+        self.conversation_context = []
+        self._startup_started = False
+        self._library_loading = False
+        self._sources_loading = False
+        self._source_connections = {}
         self.active_persona = get_active_persona(reload=True)
         self.active_language = get_language_preference(reload=True)
         self.voice_settings = get_voice_settings()
@@ -427,16 +462,113 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._sync_voice_controls()
         self._update_persona_display(add_greeting=True)
-        self.refresh_library()
-        self.refresh_knowledge_sources()
-        self._sync_cloud_files()
-        self._run_health_check()
+        self._set_chat_busy(True)
 
-        if self.scanner_settings["scan_on_startup"]:
-            self.scan_knowledge_sources(startup=True)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._startup_started:
+            self._startup_started = True
+            QTimer.singleShot(0, self, self._initialize_conversation)
 
-        if self.voice_settings["enabled"]:
-            self._refresh_audio_devices()
+    def _initialize_conversation(self):
+        persona_id = self.active_persona["id"]
+
+        def load():
+            self.conversation_store.initialize()
+            self.memory_page.memory_manager.list_memories(limit=1)
+            record = self.conversation_store.latest() or self.conversation_store.create(persona_id)
+            return record, self.conversation_store.messages(record["id"], limit=20)
+
+        self._run_worker(load, on_success=self._conversation_loaded,
+                         on_error=self._conversation_failed)
+
+    def _conversation_failed(self, message):
+        self.memory_status.setText(f"Conversation: Error — {message}")
+        self._set_chat_busy(False)
+
+    def _conversation_loaded(self, result):
+        record, messages = result
+        self.conversation_id = record["id"]
+        self.active_persona = get_persona(record["persona"])
+        self._clear_chat()
+        self._update_persona_display(add_greeting=not messages)
+        self._render_history(messages)
+        self.memory_status.setText("Memory: Ready")
+        self._set_chat_busy(False)
+        if not getattr(self, "_background_started", False):
+            self._background_started = True
+            self._run_health_check()
+            self.refresh_library()
+            self.refresh_knowledge_sources()
+            self._run_worker(AgentCore, on_success=self._agent_ready,
+                             on_error=lambda message: self.agent_status.setText(f"Agent: Error — {message}"))
+            self._sync_cloud_files()
+            if self.voice_settings["enabled"]:
+                self._refresh_audio_devices()
+
+    def _agent_ready(self, agent):
+        self.agent_status.setText("Agent: Ready")
+
+    def _clear_chat(self):
+        self.stop_voice_playback()
+        self._retire_latest_idle_avatar_panel()
+        while self.messages_layout.count():
+            widget = self.messages_layout.takeAt(0).widget()
+            if widget:
+                widget.hide()
+                widget.deleteLater()
+        self.current_ai_panel = None
+        self.latest_idle_avatar_panel = None
+        self.latest_completed_fairy_panel = None
+        self.pending_agent_confirmation = None
+        self.current_user_message = ""
+        self.current_chat_mode = None
+        self.conversation_context = []
+        self.message_input.clear()
+        self.user_message_count = 0
+        self._oldest_message_id = None
+
+    def _render_history(self, messages):
+        for row in messages:
+            if row["role"] == "user":
+                self._add_message("user", "YOU", row["content"])
+                self.user_message_count += 1
+            else:
+                self._add_persona_panel(self.active_persona, PersonaState.COMPLETE, row["content"])
+        self._oldest_message_id = messages[0]["id"] if messages else None
+        self.older_messages_button.setEnabled(len(messages) == 20)
+        self.idle_state.setVisible(self.user_message_count < 2)
+
+    def load_older_messages(self):
+        if self.chat_busy or self._oldest_message_id is None:
+            return
+        self.older_messages_button.setEnabled(False)
+        self._set_chat_busy(True)
+        self._run_worker(self.conversation_store.messages, self.conversation_id,
+                         limit=20, before=self._oldest_message_id,
+                         on_success=self._prepend_history,
+                         on_error=self._conversation_failed,
+                         on_finished=lambda: self._set_chat_busy(False))
+
+    def _prepend_history(self, messages):
+        existing_count = self.messages_layout.count()
+        self._render_history(messages)
+        for index in range(len(messages)):
+            item = self.messages_layout.takeAt(existing_count)
+            self.messages_layout.insertWidget(index, item.widget())
+
+    def new_conversation(self):
+        if self.chat_busy:
+            return
+        self._set_chat_busy(True)
+        persona_id = self.active_persona["id"]
+
+        def create():
+            self.conversation_store.initialize()
+            return self.conversation_store.create(persona_id), []
+
+        self._run_worker(create, on_success=self._conversation_loaded,
+                         on_error=self._conversation_failed)
 
     def _build_ui(self):
         root = QWidget()
@@ -505,10 +637,16 @@ class MainWindow(QMainWindow):
             badges.addWidget(badge)
 
         layout.addLayout(badges)
-        self.ollama_status = QLabel("正在检查 Ollama…")
+        self.ollama_status = QLabel("Local AI: Loading")
         self.ollama_status.setObjectName("mutedLabel")
         self.ollama_status.setWordWrap(True)
         layout.addWidget(self.ollama_status)
+        self.knowledge_ready_status = QLabel("Knowledge: Loading")
+        self.memory_status = QLabel("Memory: Loading")
+        self.agent_status = QLabel("Agent: Loading")
+        for status in (self.knowledge_ready_status, self.memory_status, self.agent_status):
+            status.setWordWrap(True)
+            layout.addWidget(status)
         return sidebar
 
     def _build_chat_page(self):
@@ -533,6 +671,13 @@ class MainWindow(QMainWindow):
         self.chat_mode.addItem("普通对话", "normal")
         self.chat_mode.addItem("知识库对话（RAG）", "rag")
         self.chat_mode.setMinimumWidth(190)
+        self.new_chat_button = QPushButton("新建聊天")
+        self.new_chat_button.clicked.connect(self.new_conversation)
+        header.addWidget(self.new_chat_button)
+        self.older_messages_button = QPushButton("更早消息")
+        self.older_messages_button.setEnabled(False)
+        self.older_messages_button.clicked.connect(self.load_older_messages)
+        header.addWidget(self.older_messages_button)
         header.addWidget(self.chat_mode)
         layout.addLayout(header)
 
@@ -943,6 +1088,8 @@ class MainWindow(QMainWindow):
         self.scan_on_startup_checkbox.setChecked(
             self.scanner_settings["scan_on_startup"]
         )
+        self.scan_on_startup_checkbox.setEnabled(False)
+        self.scan_on_startup_checkbox.setToolTip("启动时仅读取已有索引；请在知识来源页面手动扫描。")
         self.scan_on_startup_checkbox.toggled.connect(
             self._scan_on_startup_setting_changed
         )
@@ -1703,9 +1850,9 @@ class MainWindow(QMainWindow):
     def _run_health_check(self):
         self._run_worker(
             check_ollama,
-            on_success=lambda result: self.ollama_status.setText("Ollama：在线"),
+            on_success=lambda result: self.ollama_status.setText("Local AI: Ready"),
             on_error=lambda message: self.ollama_status.setText(
-                f"Ollama：不可用 — {message}"
+                f"Local AI: Unavailable — {message}"
             ),
         )
 
@@ -1820,6 +1967,8 @@ class MainWindow(QMainWindow):
         bar.setValue(bar.maximum())
 
     def send_message(self):
+        if self.chat_busy or self.conversation_id is None:
+            return
         if self.voice_recorder and self.voice_recorder.is_recording:
             self._set_voice_notice("请先结束当前录音。", is_error=True)
             return
@@ -1847,14 +1996,10 @@ class MainWindow(QMainWindow):
         self.current_user_message = message
         self.pending_agent_confirmation = None
         operation = stream_knowledge_chat if mode == "rag" else stream_normal_chat
-        operation_kwargs = {}
-        if mode == "normal":
-            self.active_agent_core = AgentCore()
-            operation_kwargs["agent_core"] = self.active_agent_core
-        else:
-            self.active_agent_core = None
-
         self._run_worker(
+            run_persisted_chat,
+            self.conversation_store,
+            self.conversation_id,
             operation,
             message,
             persona=dict(self.active_persona),
@@ -1864,7 +2009,6 @@ class MainWindow(QMainWindow):
             on_success=self._chat_succeeded,
             on_error=self._chat_failed,
             on_finished=self._chat_worker_finished,
-            **operation_kwargs,
         )
 
     def _append_stream_token(self, token):
@@ -1895,6 +2039,8 @@ class MainWindow(QMainWindow):
             and result.get("pending_confirmation") is not None
         ):
             self.pending_agent_confirmation = result["pending_confirmation"]
+            self.active_agent_core = result.get("_agent_core", self.active_agent_core)
+            self.conversation_context = result.get("_conversation_context", [])
             return
 
         if result and self.current_chat_mode == "rag":
@@ -1944,16 +2090,26 @@ class MainWindow(QMainWindow):
             if self.current_ai_panel:
                 self.current_ai_panel.append_text("操作已取消，本地数据未修改。")
                 self._finish_streaming_speech(self.current_ai_panel)
+            self._set_chat_busy(True)
+            self._run_worker(self.conversation_store.append, self.conversation_id,
+                             "assistant", "操作已取消，本地数据未修改。",
+                             on_error=self._chat_failed,
+                             on_finished=self._chat_worker_finished)
             return
 
         self._set_chat_busy(True)
         if self.current_ai_panel:
             self.current_ai_panel.set_state(PersonaState.SEARCHING)
         self._run_worker(
+            run_persisted_chat,
+            self.conversation_store,
+            self.conversation_id,
             stream_confirmed_agent_action,
             self.current_user_message,
             pending["confirmation_id"],
             agent_core,
+            save_user=False,
+            conversation_context=self.conversation_context,
             persona=dict(self.active_persona),
             language=dict(self.active_language),
             on_token=self._append_stream_token,
@@ -1972,18 +2128,23 @@ class MainWindow(QMainWindow):
 
     def _set_chat_busy(self, busy):
         self.chat_busy = bool(busy)
+        self.new_chat_button.setDisabled(self.chat_busy)
         self.send_button.setDisabled(self.chat_busy)
         self.message_input.setDisabled(busy)
         self.chat_mode.setDisabled(busy)
         self._update_voice_action_availability()
 
     def refresh_library(self):
-        try:
-            self.documents = list_documents()
-        except Exception as error:
-            self._show_error(str(error))
+        if self._library_loading:
             return
+        self._library_loading = True
+        self._run_worker(list_documents, on_success=self._library_loaded,
+                         on_error=lambda message: self.knowledge_ready_status.setText(f"Knowledge: Error — {message}"),
+                         on_finished=lambda: setattr(self, "_library_loading", False))
 
+    def _library_loaded(self, documents):
+        self.documents = documents
+        self.knowledge_ready_status.setText("Knowledge: Ready")
         self.knowledge_table.setRowCount(len(self.documents))
 
         for row, document in enumerate(self.documents):
@@ -2004,28 +2165,22 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_knowledge_sources(self, status_message=None):
-        """Render authorized folders and the latest persisted scanner state."""
-
-        try:
-            self.scanner_settings = load_scanner_config()
-            index = load_file_index()
-            self.scanner_config_error = ""
-        except (FileScannerError, OSError) as error:
-            self.scanner_config_error = str(error)
-            self.source_progress.setText(f"无法读取知识来源配置：{error}")
+        """Read persisted sources in a worker; never scan folders at startup."""
+        if self._sources_loading:
             return
+        self._sources_loading = True
+        self._run_worker(self._load_source_snapshot,
+                         on_success=lambda result: self._sources_loaded(result, status_message),
+                         on_error=lambda message: self.source_progress.setText(f"Knowledge Sources: Error — {message}"),
+                         on_finished=lambda: setattr(self, "_sources_loading", False))
 
-        if hasattr(self, "scan_on_startup_checkbox"):
-            self.scan_on_startup_checkbox.blockSignals(True)
-            self.scan_on_startup_checkbox.setChecked(
-                self.scanner_settings["scan_on_startup"]
-            )
-            self.scan_on_startup_checkbox.blockSignals(False)
-
+    def _load_source_snapshot(self):
+        settings = load_scanner_config()
+        index = load_file_index()
         source_rows = []
         visible_records = []
 
-        for folder in self.scanner_settings["watch_folders"]:
+        for folder in settings["watch_folders"]:
             root = Path(folder).expanduser().resolve()
             records = [
                 record
@@ -2040,7 +2195,8 @@ class MainWindow(QMainWindow):
         indexed_count = sum(record["status"] == "已索引" for record in visible_records)
         failed_count = sum(record["status"] == "失败" for record in visible_records)
         pending_count = len(visible_records) - indexed_count - failed_count
-        connected_count = sum(root.is_dir() for root, _, _ in source_rows)
+        connections = {root: root.is_dir() for root, _, _ in source_rows}
+        connected_count = sum(connections.values())
         summary_values = {
             "folders": connected_count,
             "files": len(visible_records),
@@ -2049,6 +2205,16 @@ class MainWindow(QMainWindow):
             "failed": failed_count,
         }
 
+        return settings, source_rows, visible_records, summary_values, connections
+
+    def _sources_loaded(self, result, status_message=None):
+        settings, source_rows, visible_records, summary_values, connections = result
+        self.scanner_settings = settings
+        self._source_connections = connections
+        self.scanner_config_error = ""
+        self.scan_on_startup_checkbox.blockSignals(True)
+        self.scan_on_startup_checkbox.setChecked(settings["scan_on_startup"])
+        self.scan_on_startup_checkbox.blockSignals(False)
         for key, value in summary_values.items():
             self.source_summary_values[key].setText(str(value))
 
@@ -2084,7 +2250,7 @@ class MainWindow(QMainWindow):
             pending = len(records) - indexed - failed
             values = (
                 root.as_posix(),
-                "已连接" if root.is_dir() else "目录不可用",
+                "已连接" if self._source_connections.get(root) else "目录不可用",
                 str(len(records)),
                 str(indexed),
                 str(pending),
@@ -2095,7 +2261,7 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
 
-                if column == 1 and not root.is_dir():
+                if column == 1 and not self._source_connections.get(root):
                     item.setToolTip("文件夹可能已删除、网络盘离线或当前没有访问权限。")
 
                 self.source_folder_table.setItem(row, column, item)
@@ -2118,7 +2284,7 @@ class MainWindow(QMainWindow):
 
             for record in records:
                 try:
-                    relative = Path(record["path"]).resolve().relative_to(root)
+                    relative = Path(record["path"]).relative_to(root)
                 except ValueError:
                     continue
 
@@ -2348,7 +2514,7 @@ class MainWindow(QMainWindow):
     @classmethod
     def _source_display_record(cls, record, root):
         try:
-            relative = Path(record["path"]).resolve().relative_to(root)
+            relative = Path(record["path"]).relative_to(root)
             relative_parent = relative.parent.as_posix()
             relative_path = root.name
 
@@ -2412,16 +2578,12 @@ class MainWindow(QMainWindow):
         self.cloud_sync_busy = True
         self.cloud_refresh_button.setDisabled(True)
         self.cloud_status.setText("正在检查 Supabase Storage…")
-        cloud_client = create_supabase_client(required=False)
-
-        if cloud_client is None:
-            self._cloud_sync_succeeded(sync_cloud_cache())
-            self._cloud_sync_finished()
-            return
+        def synchronize():
+            cloud_client = create_supabase_client(required=False)
+            return sync_cloud_cache(cloud_client) if cloud_client is not None else sync_cloud_cache()
 
         self._run_worker(
-            sync_cloud_cache,
-            cloud_client,
+            synchronize,
             on_success=self._cloud_sync_succeeded,
             on_error=self._cloud_sync_failed,
             on_finished=self._cloud_sync_finished,

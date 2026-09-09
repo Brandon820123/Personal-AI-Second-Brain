@@ -25,3 +25,6 @@ data/todos.db
 data/todos.db-*
 test.txt
 /*.pdf
+
+data/conversations.db
+data/conversations.db-*

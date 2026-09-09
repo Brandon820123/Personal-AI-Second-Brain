@@ -143,6 +143,7 @@ def stream_normal_chat(
     on_state=lambda state: None,
     memory_manager=None,
     agent_core=None,
+    conversation_context=None,
 ):
     """Stream a persona-styled normal-chat response locally."""
     if not isinstance(message, str) or not message.strip():
@@ -179,6 +180,7 @@ def stream_normal_chat(
                 "role": "system",
                 "content": agent_result["context"],
             }]
+    messages[-1:-1] = conversation_context or []
     on_state("thinking")
     _stream_ollama(messages, on_token)
     if active_agent is not None:
@@ -195,6 +197,7 @@ def stream_confirmed_agent_action(
     language=None,
     on_state=lambda state: None,
     memory_manager=None,
+    conversation_context=None,
 ):
     """Execute one explicitly approved action, then stream its Persona response."""
     if not isinstance(agent_core, AgentCore):
@@ -224,6 +227,7 @@ def stream_confirmed_agent_action(
             "role": "system",
             "content": agent_result["context"],
         }]
+    messages[-1:-1] = conversation_context or []
     on_state("thinking")
     _stream_ollama(messages, on_token)
     agent_core.log_final_response()
@@ -239,6 +243,7 @@ def stream_knowledge_chat(
     minimum_score=MIN_RELEVANCE_SCORE,
     on_state=lambda state: None,
     memory_manager=None,
+    conversation_context=None,
 ):
     """Retrieve local context, stream a grounded answer, and return sources."""
     if not isinstance(question, str) or not question.strip():
@@ -272,6 +277,7 @@ def stream_knowledge_chat(
         messages = build_rag_system_messages(
             persona, language, question, memory_manager=memory_manager,
         )
+        messages.extend(conversation_context or [])
         messages.append({"role": "user", "content": user_message})
         on_state("thinking")
         _stream_ollama(messages, on_token)
