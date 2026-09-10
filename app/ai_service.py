@@ -6,6 +6,9 @@ import requests
 
 try:
     from .agent_core import AgentCore, should_use_agent
+    from .agent_task_observer import AgentTaskObserver
+    from .agent_task_control import AgentTaskControl
+    from .agent_task_store import AgentTaskStore
     from .chunker import chunk_document_pages
     from .document_importer import import_document_chunks
     from .document_loader import load_document_pages
@@ -28,6 +31,9 @@ try:
     from .vector_store import VectorStore
 except ImportError:
     from agent_core import AgentCore, should_use_agent
+    from agent_task_observer import AgentTaskObserver
+    from agent_task_control import AgentTaskControl
+    from agent_task_store import AgentTaskStore
     from chunker import chunk_document_pages
     from document_importer import import_document_chunks
     from document_loader import load_document_pages
@@ -144,6 +150,9 @@ def stream_normal_chat(
     memory_manager=None,
     agent_core=None,
     conversation_context=None,
+    on_task=None,
+    task_control=None,
+    task_store=None,
 ):
     """Stream a persona-styled normal-chat response locally."""
     if not isinstance(message, str) or not message.strip():
@@ -171,11 +180,19 @@ def stream_normal_chat(
     active_agent = None
     if agent_requested:
         active_agent = agent_core or AgentCore()
+        active_agent._task_control = task_control or AgentTaskControl()
+        active_agent._task_store = task_store or AgentTaskStore()
+        active_agent._task_persona = selected_persona["id"]
         on_state("searching")
-        agent_result = active_agent.run(
-            message, conversation_context=conversation_context,
-            relevant_memory=messages[2:-1], on_state=on_state,
-        )
+        with AgentTaskObserver(active_agent, on_task, on_state,
+                               active_agent._task_store, active_agent._task_persona) as observer:
+            agent_result = active_agent.run(
+                message, conversation_context=conversation_context,
+                relevant_memory=messages[2:-1], on_state=observer.state_changed,
+            )
+        if agent_result.get("state") == "CANCELLED":
+            on_token("任务已取消；此前已完成的操作仍保留。")
+            return agent_result
         if agent_result["pending_confirmation"] is not None:
             return agent_result
         if agent_result["context"]:
@@ -201,6 +218,8 @@ def stream_confirmed_agent_action(
     on_state=lambda state: None,
     memory_manager=None,
     conversation_context=None,
+    on_task=None,
+    approved=True,
 ):
     """Execute one explicitly approved action, then stream its Persona response."""
     if not isinstance(agent_core, AgentCore):
@@ -208,9 +227,17 @@ def stream_confirmed_agent_action(
 
     selected_persona = persona or get_active_persona()
     selected_language = language or get_language_preference()
-    if agent_core._plan_execution is not None:
-        agent_core._plan_execution.on_state = on_state
-    agent_result = agent_core.confirm_action(confirmation_id, True)
+    if getattr(agent_core, "_task_control", None) is None:
+        agent_core._task_control = AgentTaskControl()
+    store = getattr(agent_core, "_task_store", None) or AgentTaskStore()
+    task_persona = getattr(agent_core, "_task_persona", selected_persona["id"])
+    with AgentTaskObserver(agent_core, on_task, on_state, store, task_persona) as observer:
+        if agent_core._plan_execution is not None:
+            agent_core._plan_execution.on_state = observer.state_changed
+        agent_result = agent_core.confirm_action(confirmation_id, approved)
+    if not approved or agent_result.get("state") == "CANCELLED":
+        on_token("后续操作已取消；此前已完成的操作仍保留。")
+        return agent_result
     if agent_result["pending_confirmation"] is not None:
         return agent_result
     messages = [

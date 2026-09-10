@@ -63,6 +63,10 @@ try:
     )
     from .ui_themes import build_stylesheet, get_theme
     from .ui.memory_page import MemoryPage
+    from .ui.agent_task_panel import AgentTaskPanel
+    from .ui.agent_task_history import AgentTaskHistory
+    from .agent_task_store import AgentTaskStore
+    from .agent_task_control import AgentTaskControl
     from .voice.audio_player import LocalAudioPlayer
     from .voice.recorder import MicrophoneRecorder, list_audio_devices
     from .voice.settings import (
@@ -100,6 +104,10 @@ except ImportError:
     )
     from ui_themes import build_stylesheet, get_theme
     from ui.memory_page import MemoryPage
+    from ui.agent_task_panel import AgentTaskPanel
+    from ui.agent_task_history import AgentTaskHistory
+    from agent_task_store import AgentTaskStore
+    from agent_task_control import AgentTaskControl
     from voice.audio_player import LocalAudioPlayer
     from voice.recorder import MicrophoneRecorder, list_audio_devices
     from voice.settings import (
@@ -219,12 +227,25 @@ def scan_and_synchronize_sources(on_progress=lambda message: None):
     return {"scan": scan_result, "sync": sync_result}
 
 
+class AgentTaskReceiver(QObject):
+    """Give task callbacks an explicit GUI-thread QObject receiver."""
+
+    def __init__(self, callback, parent):
+        super().__init__(parent)
+        self.callback = callback
+
+    @Slot(object)
+    def receive(self, snapshot):
+        self.callback(snapshot)
+
+
 class BackgroundWorker(QObject):
     """Run one blocking local operation outside the Qt GUI thread."""
 
     token = Signal(str)
     progress = Signal(str)
     state_changed = Signal(str)
+    task_updated = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
     finished = Signal()
@@ -236,6 +257,7 @@ class BackgroundWorker(QObject):
         use_token_callback=False,
         use_progress_callback=False,
         use_state_callback=False,
+        use_task_callback=False,
         **kwargs,
     ):
         super().__init__()
@@ -245,6 +267,7 @@ class BackgroundWorker(QObject):
         self.use_token_callback = use_token_callback
         self.use_progress_callback = use_progress_callback
         self.use_state_callback = use_state_callback
+        self.use_task_callback = use_task_callback
 
     @Slot()
     def run(self):
@@ -259,6 +282,9 @@ class BackgroundWorker(QObject):
 
             if self.use_state_callback:
                 callback_kwargs["on_state"] = self.state_changed.emit
+
+            if self.use_task_callback:
+                callback_kwargs["on_task"] = self.task_updated.emit
 
             result = self.operation(*self.args, **callback_kwargs)
             self.succeeded.emit(result)
@@ -392,9 +418,12 @@ class PersonaIdleWidget(QWidget):
 class MainWindow(QMainWindow):
     """Desktop shell for chat, knowledge, memory, persona, and settings pages."""
 
-    def __init__(self, conversation_store=None):
+    def __init__(self, conversation_store=None, task_store=None):
         super().__init__()
         self.conversation_store = conversation_store or ConversationStore()
+        self.task_store = task_store or AgentTaskStore()
+        self.task_history_dialog = None
+        self.current_task_control = None
         self.conversation_id = None
         self.conversation_context = []
         self._startup_started = False
@@ -422,6 +451,7 @@ class MainWindow(QMainWindow):
         self.latest_source_scan = None
         self.worker_threads = set()
         self.current_ai_panel = None
+        self.current_task_panel = None
         self.latest_idle_avatar_panel = None
         self.latest_completed_fairy_panel = None
         self.current_chat_mode = None
@@ -468,7 +498,38 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not self._startup_started:
             self._startup_started = True
-            QTimer.singleShot(0, self, self._initialize_conversation)
+            QTimer.singleShot(0, self, self._initialize_task_history)
+
+    def _initialize_task_history(self):
+        self._run_worker(self.task_store.recover_interrupted,
+                         on_error=self._task_history_error,
+                         on_finished=self._initialize_conversation)
+
+    def _show_task_history(self):
+        if self.task_history_dialog is None:
+            self.task_history_dialog = AgentTaskHistory(self)
+            self._task_list_receiver = AgentTaskReceiver(self.task_history_dialog.show_tasks, self)
+            self._task_detail_receiver = AgentTaskReceiver(self.task_history_dialog.show_task, self)
+            self.task_history_dialog.refresh_requested.connect(self._refresh_task_history)
+            self.task_history_dialog.task_selected.connect(self._load_task_detail)
+        self.task_history_dialog.show()
+        self.task_history_dialog.raise_()
+        self._refresh_task_history()
+
+    def _refresh_task_history(self):
+        self._run_worker(self.task_store.list_tasks,
+                         on_success=self._task_list_receiver.receive,
+                         on_error=self._task_history_error)
+
+    def _load_task_detail(self, task_id):
+        self._run_worker(self.task_store.get_task, task_id,
+                         on_success=self._task_detail_receiver.receive,
+                         on_error=self._task_history_error)
+
+    def _task_history_error(self, message):
+        self.agent_status.setText("Agent: 任务历史暂不可用")
+        if self.task_history_dialog is not None:
+            self.task_history_dialog.status_label.setText("任务历史读取失败，请重试。")
 
     def _initialize_conversation(self):
         persona_id = self.active_persona["id"]
@@ -518,6 +579,7 @@ class MainWindow(QMainWindow):
                 widget.hide()
                 widget.deleteLater()
         self.current_ai_panel = None
+        self.current_task_panel = None
         self.latest_idle_avatar_panel = None
         self.latest_completed_fairy_panel = None
         self.pending_agent_confirmation = None
@@ -673,6 +735,9 @@ class MainWindow(QMainWindow):
         self.chat_mode.setMinimumWidth(190)
         self.new_chat_button = QPushButton("新建聊天")
         self.new_chat_button.clicked.connect(self.new_conversation)
+        self.task_history_button = QPushButton("Agent Tasks")
+        self.task_history_button.clicked.connect(self._show_task_history)
+        header.addWidget(self.task_history_button)
         header.addWidget(self.new_chat_button)
         self.older_messages_button = QPushButton("更早消息")
         self.older_messages_button.setEnabled(False)
@@ -1809,6 +1874,7 @@ class MainWindow(QMainWindow):
         on_token=None,
         on_progress=None,
         on_state=None,
+        on_task=None,
         on_success=None,
         on_error=None,
         on_finished=None,
@@ -1821,6 +1887,7 @@ class MainWindow(QMainWindow):
             use_token_callback=on_token is not None,
             use_progress_callback=on_progress is not None,
             use_state_callback=on_state is not None,
+            use_task_callback=on_task is not None,
             **kwargs,
         )
         worker.moveToThread(thread)
@@ -1833,6 +1900,10 @@ class MainWindow(QMainWindow):
             worker.progress.connect(on_progress)
         if on_state:
             worker.state_changed.connect(on_state)
+        if on_task:
+            task_receiver = AgentTaskReceiver(on_task, self)
+            worker.task_updated.connect(task_receiver.receive, Qt.ConnectionType.QueuedConnection)
+            worker.finished.connect(task_receiver.deleteLater)
         if on_success:
             worker.succeeded.connect(on_success)
         if on_error:
@@ -1994,6 +2065,8 @@ class MainWindow(QMainWindow):
         mode = self.chat_mode.currentData()
         self.current_chat_mode = mode
         self.current_user_message = message
+        self.current_task_control = AgentTaskControl()
+        self.current_task_panel = None
         self.pending_agent_confirmation = None
         operation = stream_knowledge_chat if mode == "rag" else stream_normal_chat
         self._run_worker(
@@ -2006,9 +2079,12 @@ class MainWindow(QMainWindow):
             language=dict(self.active_language),
             on_token=self._append_stream_token,
             on_state=self._set_current_panel_state,
+            on_task=self._agent_task_updated if mode == "normal" else None,
             on_success=self._chat_succeeded,
             on_error=self._chat_failed,
             on_finished=self._chat_worker_finished,
+            **({"task_control": self.current_task_control, "task_store": self.task_store}
+               if mode == "normal" else {}),
         )
 
     def _append_stream_token(self, token):
@@ -2023,8 +2099,25 @@ class MainWindow(QMainWindow):
 
             self._scroll_conversation_to_bottom()
 
+    @Slot(object)
+    def _agent_task_updated(self, snapshot):
+        """Receive a copied task snapshot on the GUI thread, with no polling."""
+        if self.current_chat_mode != "normal" or not self.current_ai_panel:
+            return
+        if self.current_task_panel is None:
+            self.current_task_panel = AgentTaskPanel()
+            self.current_task_panel.confirmation_requested.connect(self._resolve_agent_confirmation)
+            self.current_task_panel.stop_requested.connect(self._stop_agent_task)
+            row = MessageRow(self.current_task_panel, "ai")
+            index = self.messages_layout.indexOf(self.current_ai_panel.message_row)
+            self.messages_layout.insertWidget(max(0, index), row)
+        self.current_task_panel.update_task(snapshot)
+        self.agent_status.setText(f"Agent: {snapshot['state']}")
+        self._scroll_conversation_to_bottom()
+
+    @Slot(str)
     def _set_current_panel_state(self, state):
-        if state in {"PLANNING", "EXECUTING", "WAITING_CONFIRMATION", "COMPLETE", "FAILED"}:
+        if state in {"PLANNING", "EXECUTING", "WAITING_CONFIRMATION", "COMPLETE", "FAILED", "CANCELLED"}:
             self.agent_status.setText(f"Agent: {state}")
             return
         if self.current_ai_panel:
@@ -2032,6 +2125,7 @@ class MainWindow(QMainWindow):
                 return
             self.current_ai_panel.set_state(state)
 
+    @Slot(object)
     def _chat_succeeded(self, result):
         if not self.current_ai_panel:
             return
@@ -2053,19 +2147,39 @@ class MainWindow(QMainWindow):
         self._scroll_conversation_to_bottom()
         self._finish_streaming_speech(completed_panel)
 
+    @Slot()
     def _chat_worker_finished(self):
         """Release worker state, then ask on the GUI thread when required."""
-        self._set_chat_busy(False)
         if self.pending_agent_confirmation is not None:
-            self._request_agent_confirmation()
+            self._set_chat_busy(True)
+            if self.current_task_control is not None and self.current_task_control.cancelled:
+                self._resolve_agent_confirmation(self.pending_agent_confirmation["confirmation_id"], False)
+            else:
+                self._request_agent_confirmation()
         else:
+            self._set_chat_busy(False)
             self.active_agent_core = None
+        if self.task_history_dialog is not None and self.task_history_dialog.isVisible():
+            self._refresh_task_history()
+
+    @Slot(str)
+    def _stop_agent_task(self, task_id):
+        control = self.current_task_control
+        if control is None or control.task_id != task_id:
+            return
+        control.request_cancel()
+        if self.pending_agent_confirmation is not None:
+            self._resolve_agent_confirmation(self.pending_agent_confirmation["confirmation_id"], False)
 
     def _request_agent_confirmation(self):
         """Show the frozen write call and execute it only after a Yes click."""
         pending = self.pending_agent_confirmation
         agent_core = self.active_agent_core
         if pending is None or agent_core is None:
+            return
+
+        if self.current_task_panel is not None:
+            self.current_task_panel.enable_confirmation(pending["confirmation_id"])
             return
 
         arguments = json.dumps(
@@ -2085,22 +2199,22 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        self.pending_agent_confirmation = None
+        self._resolve_agent_confirmation(
+            pending["confirmation_id"], answer == QMessageBox.StandardButton.Yes,
+        )
 
-        if answer != QMessageBox.StandardButton.Yes:
-            if agent_core._plan_execution is not None:
-                agent_core._plan_execution.on_state = self._set_current_panel_state
-            agent_core.confirm_action(pending["confirmation_id"], False)
-            self.active_agent_core = None
-            if self.current_ai_panel:
-                self.current_ai_panel.append_text("后续操作已取消；此前已完成的操作仍保留。")
-                self._finish_streaming_speech(self.current_ai_panel)
-            self._set_chat_busy(True)
-            self._run_worker(self.conversation_store.append, self.conversation_id,
-                             "assistant", "后续操作已取消；此前已完成的操作仍保留。",
-                             on_error=self._chat_failed,
-                             on_finished=self._chat_worker_finished)
+    @Slot(str, bool)
+    def _resolve_agent_confirmation(self, confirmation_id, approved):
+        """Consume the UI selection once; Core validates the ID and permissions."""
+        pending = self.pending_agent_confirmation
+        agent_core = self.active_agent_core
+        if pending is None or agent_core is None or pending["confirmation_id"] != confirmation_id:
             return
+        self.pending_agent_confirmation = None
+        if self.current_task_control is not None:
+            if not approved:
+                self.current_task_control.request_cancel()
+            approved = approved and not self.current_task_control.cancelled
 
         self._set_chat_busy(True)
         if self.current_ai_panel:
@@ -2114,17 +2228,22 @@ class MainWindow(QMainWindow):
             pending["confirmation_id"],
             agent_core,
             save_user=False,
+            approved=approved,
             conversation_context=self.conversation_context,
             persona=dict(self.active_persona),
             language=dict(self.active_language),
             on_token=self._append_stream_token,
             on_state=self._set_current_panel_state,
+            on_task=self._agent_task_updated,
             on_success=self._chat_succeeded,
             on_error=self._chat_failed,
             on_finished=self._chat_worker_finished,
         )
 
+    @Slot(str)
     def _chat_failed(self, message):
+        if self.current_task_panel is not None and self.current_task_panel.snapshot.get("state") not in {"COMPLETE", "FAILED", "CANCELLED"}:
+            self.current_task_panel.fail(message)
         if self.current_ai_panel:
             self.stop_voice_playback()
             self.current_ai_panel.set_error(message)

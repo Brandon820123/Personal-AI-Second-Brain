@@ -5,6 +5,11 @@ import json
 from importlib import import_module
 import re
 
+try:
+    from .agent_task_control import TaskCancellationError
+except ImportError:
+    from agent_task_control import TaskCancellationError
+
 
 def needs_plan(request):
     """Recognize composed local tasks without planning ordinary questions."""
@@ -54,10 +59,14 @@ class PlanExecution:
 
     def start(self):
         self.transition("PLANNING")
+        if self.cancel_if_requested():
+            return self.result()
         try:
             raw = self.owner.planner.plan(
                 self.goal, self.owner.registry.get_tools(), self.context(),
             )
+            if self.cancel_if_requested():
+                return self.result()
             if not isinstance(raw, dict) or set(raw) != {"goal", "steps"}:
                 raise ValueError("Plan must contain goal and steps.")
             if len(json.dumps(raw, ensure_ascii=False)) > 24000:
@@ -83,13 +92,34 @@ class PlanExecution:
         return self.advance()
 
     def fail(self, error):
+        if self.cancel_if_requested():
+            return self.result()
         self.error = str(error)
         self.transition("FAILED")
         return self.result()
 
+    def cancel_if_requested(self):
+        """Stop only at safe execution boundaries; leave planning policy unchanged."""
+        control = getattr(self.owner, "_task_control", None)
+        if control is None or not control.cancelled:
+            return False
+        self.pending = None
+        self.owner._pending_actions.clear()
+        for step in self.plan["steps"]:
+            if step["status"] in {"pending", "pending_confirmation"}:
+                step["status"] = "cancelled"
+        self.error = "任务已取消；此前已完成的操作仍保留。"
+        if self.state != "CANCELLED":
+            self.transition("CANCELLED")
+        return True
+
     def advance(self):
+        if self.cancel_if_requested():
+            return self.result()
         self.transition("EXECUTING")
         while self.index < len(self.plan["steps"]):
+            if self.cancel_if_requested():
+                return self.result()
             step = self.plan["steps"][self.index]
             if self.count >= self.owner.max_tool_calls:
                 return self.fail("Tool call limit reached; remaining steps were not executed.")
@@ -104,6 +134,8 @@ class PlanExecution:
                     if name != step["tool"]:
                         raise ValueError("Step decision must use the planned tool.")
                     step["arguments"] = copy.deepcopy(arguments)
+                if self.cancel_if_requested():
+                    return self.result()
                 metadata = self.owner.registry.validate_tool_call(step["tool"], step["arguments"])
                 if metadata["requires_confirmation"]:
                     self.pending = self.owner._create_pending_action(
@@ -116,7 +148,7 @@ class PlanExecution:
             except Exception as error:
                 step["status"] = "error"
                 return self.fail(error)
-            if self.state == "FAILED":
+            if self.cancel_if_requested() or self.state == "FAILED":
                 return self.result()
             self.index += 1
         self.transition("COMPLETE")
@@ -126,6 +158,10 @@ class PlanExecution:
         _bounded_json_value = _core()._bounded_json_value
         # Writes are never retried: an exception can follow a successful side effect.
         for _ in range(1 if confirmed else 2):
+            control = getattr(self.owner, "_task_control", None)
+            if control is not None and not control.begin_step():
+                self.cancel_if_requested()
+                return
             if self.count >= self.owner.max_tool_calls:
                 return self.fail("Tool call limit reached during retry.")
             self.count += 1
@@ -138,6 +174,10 @@ class PlanExecution:
                 step["status"] = "complete"
                 return
             except Exception as error:
+                if isinstance(error, TaskCancellationError):
+                    step["status"] = "cancelled"
+                    self.cancel_if_requested()
+                    return
                 record.update(status="error", error=str(error))
                 self.calls.append(record)
                 step["status"] = "error"
@@ -145,6 +185,11 @@ class PlanExecution:
             self.fail(f"Critical step {self.index + 1} ({step['tool']}) failed: {record['error']}")
 
     def resume(self, pending, approved):
+        control = getattr(self.owner, "_task_control", None)
+        if not approved and control is not None:
+            control.request_cancel()
+        if self.cancel_if_requested():
+            return self.result()
         self.pending = None
         step = self.plan["steps"][self.index]
         if not approved:
@@ -154,7 +199,7 @@ class PlanExecution:
         step["arguments"] = copy.deepcopy(pending["arguments"])
         self.transition("EXECUTING")
         self.execute(step, confirmed=True)
-        if self.state == "FAILED":
+        if self.cancel_if_requested() or self.state == "FAILED":
             return self.result()
         self.index += 1
         return self.advance()

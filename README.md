@@ -432,6 +432,117 @@ confirmation pauses. Run it with:
 RAG, Memory storage/retrieval, Scanner, Supabase, Conversation Persistence,
 Persona animation, and Voice are unchanged.
 
+## Phase 10D: Agent Task UI v1
+
+Complex Agent runs show a compact dark system card in Chat, immediately above
+their existing Persona response. `app/ui/agent_task_panel.py` displays the goal,
+up to five steps, completed-step count, task state, and expandable step results.
+The presentation maps 10C step states to `pending`, `running`, `completed`,
+`failed`, and `waiting_confirmation`. Complete and failed cards stay in the
+current conversation view; starting ordinary chat does not create a new card.
+Cards are session-only and do not change Conversation Persistence.
+
+`app/agent_task_observer.py` is a presentation adapter around existing state
+callbacks and registry calls. It copies the current plan on the worker thread
+and delegates all calls and permission checks unchanged to the original
+registry, restoring that registry when the operation exits. It never edits the
+plan or changes routing, retries, execution limits, or confirmation policy.
+
+`BackgroundWorker.task_updated = Signal(object)` carries these snapshots to an
+explicit GUI-thread `AgentTaskReceiver` using `QueuedConnection`, then to the
+task panel. Existing worker state callbacks and final Persona streaming remain
+in place. There is no database polling or main-thread tool execution.
+
+At `WAITING_CONFIRMATION`, the card shows the frozen operation parameters and
+Confirm/Cancel buttons. Buttons become enabled only after the worker returns
+the pending action. A click disables both immediately and sends the original
+one-use ID and approval boolean through the existing service/Core confirmation
+path in another worker. Subsequent writes require their own confirmation. Chat
+submission stays disabled until confirmation is resolved. Simple 10B actions
+without a complex plan retain their existing confirmation dialog.
+
+File previews show `data/notes/<filename>.md` when an explicit filename exists;
+otherwise they explain that the existing action assigns the filename at execution.
+Failure reasons are short plain text, without tracebacks. No Persona animation,
+Voice, Agent Core, Tool Registry, Memory, RAG, Scanner, Supabase, or persistence
+implementation is changed.
+
+Routing remains as in 10C: use “搜索 Physics 资料并总结” for the search-summary
+acceptance case; “搜索 Physics 并总结” alone does not satisfy the existing
+local-data route guard. “What is GPU?” remains ordinary chat.
+
+Run the offscreen task UI tests and related regressions with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_agent_task_ui tests.test_agent_plan tests.test_agent_core tests.test_tool_registry tests.test_ai_service -v
+```
+
+The UI tests exercise real QThreads, queued snapshots, main-thread delivery,
+button clicks, cancellation, repeated confirmation, retained results, plain-text
+errors, and permission-preserving observation, with isolated tools and no network,
+database writes, or audio services.
+
+## Phase 10E: Agent Task History and Cooperative Stop
+
+`app/agent_task_store.py` stores desktop/service Agent task history separately in
+`data/agent_tasks.db`. Ordinary chat creates no task record. The database and its
+SQLite sidecars are ignored by Git. Each worker operation opens a short-lived
+SQLite connection; task and step updates commit together at every task-state and
+step-progress event, including PLANNING and WAITING_CONFIRMATION.
+
+| Table | Columns |
+| --- | --- |
+| `agent_tasks` | `task_id` (TEXT primary key), `goal`, `status`, `persona`, `created_at`, `started_at`, `completed_at`, `current_step` (INTEGER), `total_steps` (INTEGER), `error_message` |
+| `agent_task_steps` | `task_id` (foreign key), `step_index` (INTEGER), `tool`, `status`, `result_summary`, `started_at`, `completed_at` |
+
+The step primary key is `(task_id, step_index)`. Indices are zero-based;
+`current_step` is the execution cursor (equal to total steps after completion).
+Timestamps use UTC ISO 8601 text. Result summaries are capped at 1200 characters
+and errors at 240 characters. No confirmation IDs, full conversation history,
+or executable write arguments are stored. Terminal records cannot be overwritten
+by delayed progress. History storage errors are reported in the card without
+disabling safe cancellation.
+
+`AgentTaskControl` supplies a per-request UUID and a thread-safe cancellation
+flag. **停止任务** appears while PLANNING, EXECUTING, or WAITING_CONFIRMATION.
+The button sets the flag immediately without killing a Python or Qt thread.
+Execution checks it before/after planning calls, between steps, before retries,
+and at tool admission. An already admitted tool call may finish, so stopping can
+wait for the current local model/tool call to return. Completed results remain;
+remaining steps become cancelled and the task becomes CANCELLED. Already started
+writes are not rolled back. No later write can be admitted after cancellation.
+
+If awaiting approval, stop resolves the existing confirmation as denied in a
+worker. Core invalidates all pending IDs; even an approval arriving after the
+flag is set cannot execute the pending write. The card's existing Cancel button
+also uses CANCELLED in the service workflow. Planning prompts, plan validation,
+routing, registry permissions, and call/retry limits remain unchanged; only
+execution cancellation checkpoints were added to `agent_plan.py`.
+
+Chat's **Agent Tasks** button opens a read-only history window showing the latest
+50 tasks. Selecting a task loads its goal, Persona, status, step results and
+timestamps in a worker. Refresh is explicit or triggered when a task worker
+finishes while the history window is visible; there is no database polling.
+GUI updates continue through Qt signals and GUI-thread receivers.
+
+Before loading the startup conversation, a background recovery operation marks
+previous PLANNING, EXECUTING, and WAITING_CONFIRMATION records INTERRUPTED, with
+“该任务因上次程序退出而中断。” Existing COMPLETE, FAILED, and CANCELLED records
+remain unchanged. Waiting confirmations are interrupted too because approval IDs
+are intentionally not persisted. History offers no automatic or manual Resume.
+
+Focused regression command:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_agent_task_history tests.test_agent_task_ui tests.test_agent_plan tests.test_agent_core tests.test_tool_registry tests.test_ai_service -v
+```
+
+The tests use temporary SQLite databases, deterministic tools and offscreen Qt
+workers to verify live saves, completed/failed history, stop during planning and
+execution, write-admission races, invalidated approval IDs, restart recovery,
+history selection, and ordinary-chat exclusion. Conversation Persistence, RAG,
+Memory, Scanner, Supabase, Persona Animation, and Voice are unchanged.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

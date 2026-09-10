@@ -28,3 +28,6 @@ test.txt
 
 data/conversations.db
 data/conversations.db-*
+
+data/agent_tasks.db
+data/agent_tasks.db-*

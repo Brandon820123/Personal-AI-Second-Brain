@@ -2,6 +2,8 @@
 
 import copy
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -29,6 +31,14 @@ def step(tool, **kwargs):
 
 
 class PlanTests(unittest.TestCase):
+    def setUp(self):
+        from app.agent_task_store import AgentTaskStore
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patcher = patch("app.ai_service.AgentTaskStore", return_value=AgentTaskStore(Path(directory.name) / "tasks.db"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_agent(self, steps, failure=None, limit=5):
         self.writes = []
         self.reads = []
