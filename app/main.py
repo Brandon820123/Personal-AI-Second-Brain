@@ -89,9 +89,11 @@ def stream_response(
     confirmed_agent_action = False
     if use_memory and should_use_agent(user_message):
         active_agent = agent_core or AgentCore()
-        agent_result = active_agent.run(user_message)
+        agent_result = active_agent.run(
+            user_message, relevant_memory=request_data["messages"][2:-1],
+        )
         pending = agent_result["pending_confirmation"]
-        if pending is not None:
+        while pending is not None:
             print("\nAgent requests confirmation for a local write action:")
             print(f"Tool: {pending['tool']}")
             print(
@@ -105,9 +107,10 @@ def stream_response(
                 approved,
             )
             if not approved:
-                print("Agent action cancelled. No local data was changed.")
+                print("Remaining Agent actions cancelled. Earlier completed actions remain saved.")
                 return
             confirmed_agent_action = True
+            pending = agent_result["pending_confirmation"]
         if agent_result["context"]:
             request_data["messages"][-1:-1] = [{
                 "role": "system",

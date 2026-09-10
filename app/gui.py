@@ -2024,6 +2024,9 @@ class MainWindow(QMainWindow):
             self._scroll_conversation_to_bottom()
 
     def _set_current_panel_state(self, state):
+        if state in {"PLANNING", "EXECUTING", "WAITING_CONFIRMATION", "COMPLETE", "FAILED"}:
+            self.agent_status.setText(f"Agent: {state}")
+            return
         if self.current_ai_panel:
             if self._speech_is_active():
                 return
@@ -2039,7 +2042,7 @@ class MainWindow(QMainWindow):
             and result.get("pending_confirmation") is not None
         ):
             self.pending_agent_confirmation = result["pending_confirmation"]
-            self.active_agent_core = result.get("_agent_core", self.active_agent_core)
+            self.active_agent_core = result.get("_agent_core") or self.active_agent_core
             self.conversation_context = result.get("_conversation_context", [])
             return
 
@@ -2085,14 +2088,16 @@ class MainWindow(QMainWindow):
         self.pending_agent_confirmation = None
 
         if answer != QMessageBox.StandardButton.Yes:
+            if agent_core._plan_execution is not None:
+                agent_core._plan_execution.on_state = self._set_current_panel_state
             agent_core.confirm_action(pending["confirmation_id"], False)
             self.active_agent_core = None
             if self.current_ai_panel:
-                self.current_ai_panel.append_text("操作已取消，本地数据未修改。")
+                self.current_ai_panel.append_text("后续操作已取消；此前已完成的操作仍保留。")
                 self._finish_streaming_speech(self.current_ai_panel)
             self._set_chat_busy(True)
             self._run_worker(self.conversation_store.append, self.conversation_id,
-                             "assistant", "操作已取消，本地数据未修改。",
+                             "assistant", "后续操作已取消；此前已完成的操作仍保留。",
                              on_error=self._chat_failed,
                              on_finished=self._chat_worker_finished)
             return

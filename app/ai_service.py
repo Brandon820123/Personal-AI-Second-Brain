@@ -172,7 +172,10 @@ def stream_normal_chat(
     if agent_requested:
         active_agent = agent_core or AgentCore()
         on_state("searching")
-        agent_result = active_agent.run(message)
+        agent_result = active_agent.run(
+            message, conversation_context=conversation_context,
+            relevant_memory=messages[2:-1], on_state=on_state,
+        )
         if agent_result["pending_confirmation"] is not None:
             return agent_result
         if agent_result["context"]:
@@ -205,7 +208,11 @@ def stream_confirmed_agent_action(
 
     selected_persona = persona or get_active_persona()
     selected_language = language or get_language_preference()
+    if agent_core._plan_execution is not None:
+        agent_core._plan_execution.on_state = on_state
     agent_result = agent_core.confirm_action(confirmation_id, True)
+    if agent_result["pending_confirmation"] is not None:
+        return agent_result
     messages = [
         {
             "role": "system",

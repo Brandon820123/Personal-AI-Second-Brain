@@ -187,7 +187,7 @@ class AgentCoreTests(unittest.TestCase):
         self.assertIn("not registered", result["error"])
         self.assertIn("agent_error", result["context"])
 
-    def test_default_registry_contains_only_phase_10a_read_tools(self):
+    def test_default_registry_contains_only_phase_10c_tools(self):
         names = {
             tool["name"] for tool in build_default_tool_registry().get_tools()
         }
@@ -197,6 +197,8 @@ class AgentCoreTests(unittest.TestCase):
             "search_memory",
             "scan_knowledge_sources",
             "list_knowledge_files",
+            "summarize_knowledge", "create_note", "update_memory",
+            "create_todo", "list_todos", "complete_todo",
         })
         self.assertNotIn("shell", names)
 
@@ -208,6 +210,7 @@ class AgentCoreTests(unittest.TestCase):
             "context": "BEGIN_AGENT_TOOL_DATA\ntrusted result\nEND_AGENT_TOOL_DATA",
             "limit_reached": False,
             "error": None,
+            "pending_confirmation": None,
         }
         states = []
 

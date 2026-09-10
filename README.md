@@ -379,6 +379,59 @@ focused Agent tests or complete regression suite with:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+## Phase 10C: Multi-step Agent v1
+
+Complex local requests now use `app/agent_plan.py` through Agent Core:
+
+```text
+local-data route guard -> complex-task guard -> PLANNING
+  -> validated JSON plan -> EXECUTING -> next step
+  -> WAITING_CONFIRMATION (before each write) -> EXECUTING
+  -> COMPLETE or FAILED -> existing Persona response stream
+```
+
+A plan contains the original `goal` and 1–5 sequential `steps`. Each step names
+an allowlisted `tool`, an optional `instruction`, optional schema-valid
+`arguments`, and a `critical` flag (default true). Runtime-owned `status` and
+`attempts` are never trusted from the model. Arguments omitted by the planner
+are resolved immediately before that step, using the original goal, current
+plan, prior results, up to six recent context messages (6000 characters), and
+the existing relevant Memory block (2400 characters). The initial plan is capped
+at 24000 characters; tool results retain the existing 7000-character bound.
+Reference data is untrusted and does not grant permission or override the goal.
+
+Research summaries can use `search_knowledge` then the new read-only
+`summarize_knowledge` tool. Review-note requests can add `create_note` after
+synthesis. Multiple todos use one `create_todo` step per item. Ordinary questions
+such as “What is GPU?” bypass the Agent; simple local requests retain the
+lightweight 10A/10B decision route and its three-call bound.
+
+Complex plans have a shared maximum of five actual tool calls, including retries
+and calls resumed after confirmation. Read failures can retry once. A failed
+critical step stops the task; explicitly optional independent read failures are
+recorded and may be skipped. Writes are never retried automatically because an
+error may follow a partial side effect. There is no replanning loop.
+
+`create_note`, `update_memory`, `create_todo`, and `complete_todo` retain 10B's
+registry enforcement and frozen, one-use confirmation IDs. Every write pauses
+for its own approval; approving a plan or an earlier action never approves later
+writes. Confirmation resumes the same in-memory plan and call budget. Denial
+cancels remaining steps, preserving earlier completed actions. Starting another
+request invalidates outstanding approval IDs. Plans are not persisted across
+restarts. GUI status uses plain Agent text, without changing Persona animation.
+
+The isolated `tests/test_agent_plan.py` suite covers acceptance scenarios A–E,
+context transfer, all four protected tools, cancellation, replay and payload
+tampering, optional failures, oversized plans, write failures, and budgets across
+confirmation pauses. Run it with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_agent_plan tests.test_agent_core tests.test_tool_registry -v
+```
+
+RAG, Memory storage/retrieval, Scanner, Supabase, Conversation Persistence,
+Persona animation, and Voice are unchanged.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:
