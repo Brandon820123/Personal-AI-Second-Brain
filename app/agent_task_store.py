@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+from threading import Lock
 
 
 DEFAULT_TASK_DB = Path(__file__).resolve().parents[1] / "data" / "agent_tasks.db"
@@ -31,6 +32,8 @@ class AgentTaskStore:
 
     def __init__(self, db_path=None):
         self.db_path = Path(db_path or DEFAULT_TASK_DB)
+        self._schema_ready = False
+        self._schema_lock = Lock()
 
     @contextmanager
     def _connect(self):
@@ -38,21 +41,25 @@ class AgentTaskStore:
         with closing(sqlite3.connect(self.db_path, timeout=5)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.executescript("""
-                CREATE TABLE IF NOT EXISTS agent_tasks (
-                    task_id TEXT PRIMARY KEY, goal TEXT NOT NULL, status TEXT NOT NULL,
-                    persona TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
-                    completed_at TEXT, current_step INTEGER NOT NULL,
-                    total_steps INTEGER NOT NULL, error_message TEXT
-                );
-                CREATE TABLE IF NOT EXISTS agent_task_steps (
-                    task_id TEXT NOT NULL REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
-                    step_index INTEGER NOT NULL, tool TEXT NOT NULL, status TEXT NOT NULL,
-                    result_summary TEXT, started_at TEXT, completed_at TEXT,
-                    PRIMARY KEY (task_id, step_index)
-                );
-                CREATE INDEX IF NOT EXISTS agent_tasks_created ON agent_tasks(created_at DESC);
-            """)
+            if not self._schema_ready:
+                with self._schema_lock:
+                    if not self._schema_ready:
+                        connection.executescript("""
+                            CREATE TABLE IF NOT EXISTS agent_tasks (
+                                task_id TEXT PRIMARY KEY, goal TEXT NOT NULL, status TEXT NOT NULL,
+                                persona TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
+                                completed_at TEXT, current_step INTEGER NOT NULL,
+                                total_steps INTEGER NOT NULL, error_message TEXT
+                            );
+                            CREATE TABLE IF NOT EXISTS agent_task_steps (
+                                task_id TEXT NOT NULL REFERENCES agent_tasks(task_id) ON DELETE CASCADE,
+                                step_index INTEGER NOT NULL, tool TEXT NOT NULL, status TEXT NOT NULL,
+                                result_summary TEXT, started_at TEXT, completed_at TEXT,
+                                PRIMARY KEY (task_id, step_index)
+                            );
+                            CREATE INDEX IF NOT EXISTS agent_tasks_created ON agent_tasks(created_at DESC);
+                        """)
+                        self._schema_ready = True
             with connection:
                 yield connection
 

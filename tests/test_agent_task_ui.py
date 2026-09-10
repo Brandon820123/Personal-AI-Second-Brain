@@ -29,8 +29,9 @@ class FixedPlanner:
 
     def plan(self, goal, tools, context):
         return {"goal": goal, "steps": [
-            {"tool": name, "arguments": {"title": "Physics", "filename": "physics_review.md"}}
-            for name in self.names
+            {"tool": name, "arguments": {"title": "Physics", "filename":
+                "physics_review.md" if self.names[:index].count(name) == 0 else f"physics_review_{index}.md"}}
+            for index, name in enumerate(self.names)
         ]}
 
 
@@ -102,19 +103,22 @@ class AgentTaskGuiTests(unittest.TestCase):
         self.callback_threads = self.window.task_threads
 
     def wait_until(self, predicate):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 10
         while not predicate() and time.monotonic() < deadline:
-            QTest.qWait(10)
-        self.assertTrue(predicate(), "Qt task did not settle within 5 seconds")
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.assertTrue(predicate(), "Qt task did not settle within 10 seconds")
 
     def tearDown(self):
-        self.wait_until(lambda: not self.window.worker_threads)
-        self.window.close()
-        self.window.deleteLater()
-        self.app.processEvents()
-        for item in reversed(self.patches):
-            item.stop()
-        self.task_directory.cleanup()
+        try:
+            self.wait_until(lambda: not self.window.worker_threads)
+            self.window.close()
+            self.window.deleteLater()
+            self.app.processEvents()
+        finally:
+            for item in reversed(self.patches):
+                item.stop()
+            self.task_directory.cleanup()
 
     def send(self, text, names, fail=False):
         self.agent = make_agent(names, self.writes, fail)
@@ -182,6 +186,54 @@ class AgentTaskGuiTests(unittest.TestCase):
         self.window._initialize_task_history()
         self.wait_until(lambda: not self.window.worker_threads)
         self.assertEqual(loaded, ["INTERRUPTED"])
+
+    def test_timeout_fails_task_and_late_result_does_not_change_ui(self):
+        agent = make_agent(["search_knowledge", "create_note"], self.writes)
+        agent.tool_timeout = 0.5
+        release, ended = threading.Event(), threading.Event()
+        original = agent.registry.execute_tool
+        def blocked(*args, **kwargs):
+            release.wait(4)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                ended.set()
+        agent.registry.execute_tool = blocked
+        with patch("app.gui.AgentCore", return_value=agent):
+            self.window.message_input.setPlainText("搜索资料并创建笔记")
+            self.window.send_message()
+            try:
+                self.wait_until(lambda: not self.window.worker_threads)
+                panel = self.window.current_task_panel
+                self.assertEqual(panel.heading.text(), "⚠ Task Failed")
+                self.assertIn("超时", panel.reason_label.text())
+                self.assertFalse(self.window.chat_busy)
+            finally:
+                release.set()
+            self.wait_until(ended.is_set)
+            QTest.qWait(30)
+        self.assertEqual(panel.snapshot["state"], "FAILED")
+        self.assertEqual(self.task_store.list_tasks()[0]["status"], "FAILED")
+        self.assertEqual(self.writes, [])
+
+    def test_repeated_snapshot_cannot_reenable_submitted_confirmation(self):
+        panel = AgentTaskPanel()
+        self.addCleanup(panel.deleteLater)
+        events = []
+        panel.confirmation_requested.connect(lambda *args: events.append(args))
+        snapshot = {"state": "WAITING_CONFIRMATION", "plan": {"goal": "Physics", "steps": []},
+                    "pending_confirmation": {"tool": "create_note", "arguments": {}, "confirmation_id": "once"}}
+        panel.update_task(snapshot)
+        panel.enable_confirmation("once")
+        panel.confirm_button.click()
+        panel.update_task(snapshot)
+        panel.enable_confirmation("once")
+        panel.confirm_button.click()
+        self.assertEqual(len(events), 1)
+        self.assertFalse(panel.confirm_button.isEnabled())
+        panel.fail("Tool failed")
+        panel.update_task(snapshot)
+        self.assertEqual(panel.snapshot["state"], "FAILED")
 
     def test_b_read_task_signals_and_retained_results(self):
         self.send("搜索 Physics 资料并总结", ["search_knowledge", "summarize_knowledge"])

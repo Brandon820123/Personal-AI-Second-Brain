@@ -44,6 +44,7 @@ class AgentTaskPanel(QFrame):
         self.snapshot = {}
         self.confirmation_id = None
         self.stopping = False
+        self.submitted_confirmations = set()
         self.setStyleSheet("""
             QFrame#agentTaskPanel { background: #101b28; border: 1px solid #2c6680;
                 border-left: 3px solid #52d6ec; border-radius: 6px; }
@@ -104,6 +105,10 @@ class AgentTaskPanel(QFrame):
 
     @Slot(object)
     def update_task(self, snapshot):
+        if self.snapshot.get("state") in {"COMPLETE", "FAILED", "CANCELLED", "INTERRUPTED"}:
+            return
+        previous_id = self.confirmation_id
+        was_ready = self.confirm_button.isEnabled()
         self.snapshot = copy.deepcopy(snapshot)
         snapshot = self.snapshot
         for record in snapshot.get("tool_calls", []) + snapshot.get("plan", {}).get("steps", []):
@@ -117,7 +122,7 @@ class AgentTaskPanel(QFrame):
             f"{STEP_SYMBOLS.get(step.get('status'), '○')} "
             f"{TOOL_LABELS.get(step.get('tool'), step.get('tool', 'Step'))}"
             for step in steps
-        ) or "正在生成任务计划…")
+        ) or ("正在生成任务计划…" if state == "PLANNING" else "未执行任何步骤。"))
         completed = sum(step.get("status") == "completed" for step in steps)
         self.status_label.setText(f"Status: {state}  ·  {completed}/{len(steps)}")
         self.heading.setText({"COMPLETE": "✓ Task Complete", "FAILED": "⚠ Task Failed",
@@ -134,6 +139,8 @@ class AgentTaskPanel(QFrame):
         pending = snapshot.get("pending_confirmation") if state == "WAITING_CONFIRMATION" else None
         self.confirmation_id = pending.get("confirmation_id") if pending else None
         self._show_confirmation(bool(pending))
+        if pending and previous_id == self.confirmation_id and was_ready:
+            self.enable_confirmation(self.confirmation_id)
         if pending:
             arguments = pending.get("arguments", {})
             if pending["tool"] == "create_note":
@@ -160,7 +167,8 @@ class AgentTaskPanel(QFrame):
 
     def enable_confirmation(self, confirmation_id):
         """Called only after the worker has returned the pending action."""
-        if confirmation_id == self.confirmation_id and confirmation_id and not self.stopping:
+        if (confirmation_id == self.confirmation_id and confirmation_id and not self.stopping
+                and confirmation_id not in self.submitted_confirmations):
             self.confirm_button.setEnabled(True)
             self.cancel_button.setEnabled(True)
 
@@ -169,6 +177,7 @@ class AgentTaskPanel(QFrame):
             return
         self.confirm_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
+        self.submitted_confirmations.add(self.confirmation_id)
         self.confirmation_requested.emit(self.confirmation_id, approved)
 
     def fail(self, reason):

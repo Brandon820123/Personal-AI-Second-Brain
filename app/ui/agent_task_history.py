@@ -14,6 +14,12 @@ class AgentTaskHistory(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Agent Tasks / Task History")
         self.resize(740, 520)
+        self.setStyleSheet("""
+            QDialog { background: #0b1420; color: #dcebf5; }
+            QListWidget { background: #101b28; color: #dcebf5; border: 1px solid #2c6680; }
+            QListWidget::item { padding: 6px; }
+            QListWidget::item:selected { background: #174354; color: #e8faff; }
+        """)
         self.selected_task_id = None
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
@@ -26,6 +32,9 @@ class AgentTaskHistory(QDialog):
         header.addWidget(refresh)
         layout.addLayout(header)
         self.tasks = QListWidget()
+        font = self.tasks.font()
+        font.setFamilies(["Microsoft YaHei UI", "Segoe UI Symbol", "sans-serif"])
+        self.tasks.setFont(font)
         self.tasks.currentItemChanged.connect(self._selected)
         layout.addWidget(self.tasks, 1)
         self.details = QPlainTextEdit()

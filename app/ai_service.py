@@ -190,6 +190,9 @@ def stream_normal_chat(
                 message, conversation_context=conversation_context,
                 relevant_memory=messages[2:-1], on_state=observer.state_changed,
             )
+        if agent_result.get("state") == "FAILED":
+            on_token("任务失败：" + str(agent_result["error"])[:240])
+            return agent_result
         if agent_result.get("state") == "CANCELLED":
             on_token("任务已取消；此前已完成的操作仍保留。")
             return agent_result
@@ -235,6 +238,9 @@ def stream_confirmed_agent_action(
         if agent_core._plan_execution is not None:
             agent_core._plan_execution.on_state = observer.state_changed
         agent_result = agent_core.confirm_action(confirmation_id, approved)
+    if agent_result.get("state") == "FAILED":
+        on_token("任务失败：" + str(agent_result["error"])[:240])
+        return agent_result
     if not approved or agent_result.get("state") == "CANCELLED":
         on_token("后续操作已取消；此前已完成的操作仍保留。")
         return agent_result

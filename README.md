@@ -543,6 +543,67 @@ execution, write-admission races, invalidated approval IDs, restart recovery,
 history selection, and ordinary-chat exclusion. Conversation Persistence, RAG,
 Memory, Scanner, Supabase, Persona Animation, and Voice are unchanged.
 
+## Phase 10F: Agent Stability and UX Polish
+
+Routing now distinguishes ordinary chat, Knowledge, Memory, and Agent work.
+Definitions and follow-ups such as “What is GPU?”, “shorter”, “even shorter”,
+and “Explain the second one.” stay on normal chat with the existing recent
+conversation context. Simple local knowledge and Memory requests use the
+existing read-only tool path, scoped to that route, without a complex plan or
+Task Panel. A conjunction joining topics alone does not trigger multi-step
+planning. Compound operations and multiple-todo requests retain finite plans;
+single write requests retain their existing explicit confirmation path.
+
+Successful tool results are cached by tool name plus canonical JSON arguments
+within one task. Repeated plan steps reuse those results without spending another
+tool call or repeating an already successful write. The lightweight router stops
+when it proposes the same successful call again. Every successful write clears
+read caches that may now be stale. Failed and timed-out results are never cached.
+Later steps still receive the original goal, current plan, previous results,
+bounded recent conversation, and relevant Memory.
+
+Core operations are mutually exclusive, and confirmation IDs are consumed before
+execution. Task Panel remembers submitted IDs, so repeated clicks or duplicate
+snapshots cannot re-enable a resolved action. Terminal UI states reject late
+progress, and task IDs prevent older work from updating a newer response.
+Worker callbacks use explicit GUI-thread QObject receivers and queued signals.
+The history list now has an explicit dark background and readable selection.
+
+`app/agent_runtime.py` adds a 120-second default deadline to each planner/argument
+decision and tool call (`AgentCore(tool_timeout=...)`, maximum 300 seconds).
+The task becomes FAILED on timeout, does not retry or execute later steps, and
+returns a short error without waiting for another LLM answer. Cancel still wins
+at a safe boundary if requested. Late results cannot populate the result cache,
+update the terminal card, or overwrite terminal history. At most four outstanding
+call threads are admitted process-wide; saturation fails promptly instead of
+creating an unbounded queue.
+
+Python cannot safely terminate an arbitrary synchronous call. Deadline workers
+are daemon threads and are not killed: a timed-out operation may finish later,
+including a write that already started. Its result is discarded and its original
+confirmation cannot be replayed. Inspect local data before requesting another
+write after an uncertain timeout. This is a reporting deadline, not transactional
+rollback or a guarantee that an OS/network operation has physically stopped.
+
+Development DEBUG logs cover routing, plans, tool calls/results/cache hits,
+confirmation, cancellation, task terminal states, and timeouts. Normal GUI use
+does not enable or display these logs. Known limits remain conservative keyword
+routing, no automatic Resume, and no hard termination of synchronous tools.
+
+Run the focused regression suite (temporary SQLite, mocked tools/models and real
+offscreen Qt workers) with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_agent_stability tests.test_agent_task_history tests.test_agent_task_ui tests.test_agent_plan tests.test_agent_core tests.test_tool_registry tests.test_ai_service -v
+```
+
+Coverage includes continuous ordinary conversation, read-result reuse, one-time
+and concurrent confirmations, cache invalidation after writes, cancellation,
+tool deadlines and late results, context transfer, debug logs, and restart
+recovery. No new Agent tool or capability was introduced. Persona Animation,
+Voice, Supabase, Scanner, RAG core, Memory, and Conversation Persistence remain
+unchanged.
+
 ## Persona Avatar Assets
 
 The desktop UI uses processed, square Persona artwork from `assets/avatars/`:

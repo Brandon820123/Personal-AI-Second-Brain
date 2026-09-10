@@ -28,6 +28,7 @@ class AgentTaskObserver:
         self.registry = None
         self.store = store
         self.persona = persona
+        self.execution = None
 
     def __enter__(self):
         if self.on_task is not None or self.store is not None:
@@ -44,21 +45,19 @@ class AgentTaskObserver:
         self.publish()
 
     def publish(self, step_status=None, result=None, error=None):
-        execution = getattr(self.agent, "_plan_execution", None)
-        if execution is None:
+        execution = self.execution or getattr(self.agent, "_plan_execution", None)
+        if execution is None or (step_status is not None and execution.state in {"COMPLETE", "FAILED", "CANCELLED"}):
             return
+        self.execution = execution
         snapshot = execution.result()
         snapshot.pop("context", None)
         snapshot["current_step"] = execution.index
         control = getattr(self.agent, "_task_control", None)
         if control is not None:
             snapshot["task_id"] = control.task_id
-        offset = 0
-        for step in snapshot["plan"]["steps"]:
+        for index, step in enumerate(snapshot["plan"]["steps"]):
             step["status"] = STEP_STATES.get(step["status"], "pending")
-            attempts = step.get("attempts", 0)
-            records = snapshot["tool_calls"][offset:offset + attempts]
-            offset += attempts
+            records = [record for record in snapshot["tool_calls"] if record.get("step_index") == index]
             if records:
                 step["result"] = records[-1].get("result")
                 step["error"] = records[-1].get("error")
@@ -96,6 +95,9 @@ class _ObservedRegistry:
 
     def execute_tool(self, name, arguments, *, confirmed=False):
         self.observer.publish("running")
+        execution = self.observer.execution
+        if execution is not None and execution.state in {"COMPLETE", "FAILED", "CANCELLED"}:
+            raise TaskCancellationError("任务已结束，未执行此步骤。")
         control = getattr(self.observer.agent, "_task_control", None)
         if control is not None and not control.begin_step():
             raise TaskCancellationError("任务已取消，未执行此步骤。")
@@ -104,6 +106,6 @@ class _ObservedRegistry:
         except Exception as error:
             self.observer.publish("failed", error=error)
             raise
-        # Do not serialize or mutate the tool return value; Core still validates it.
+        # Bound the presentation summary; return the original value for Core validation.
         self.observer.publish("completed", result=summary(result))
         return result

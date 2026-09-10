@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import secrets
+from threading import Lock
 
 import requests
 
@@ -34,6 +35,7 @@ try:
         ToolRegistryError,
     )
     from .vector_store import VectorStore
+    from .agent_runtime import AgentTimeoutError, call_with_timeout
 except ImportError:
     from action_tools import (
         complete_todo_action,
@@ -60,6 +62,7 @@ except ImportError:
         ToolRegistryError,
     )
     from vector_store import VectorStore
+    from agent_runtime import AgentTimeoutError, call_with_timeout
 
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
@@ -205,9 +208,14 @@ class OllamaDecisionPlanner:
 class AgentCore:
     """Execute model-selected tools with strict validation and a hard limit."""
 
-    def __init__(self, registry=None, planner=None, max_tool_calls=MAX_TOOL_CALLS):
+    def __init__(self, registry=None, planner=None, max_tool_calls=MAX_TOOL_CALLS, tool_timeout=120):
         if type(max_tool_calls) is not int or not 1 <= max_tool_calls <= MAX_TOOL_CALLS:
             raise ValueError("Agent max_tool_calls must be between 1 and 5.")
+        if type(tool_timeout) not in (int, float) or not 0 < tool_timeout <= 300:
+            raise ValueError("Agent tool_timeout must be between 0 and 300 seconds.")
+        self.tool_timeout = tool_timeout
+        self._operation_lock = Lock()
+        self._result_cache = {}
         self.registry = registry or build_default_tool_registry()
         self.planner = planner or OllamaDecisionPlanner()
         self.max_tool_calls = max_tool_calls
@@ -215,19 +223,38 @@ class AgentCore:
         self._plan_execution = None
         self.state = "COMPLETE"
 
-    def run(self, user_request, *, conversation_context=None, relevant_memory=None, on_state=lambda state: None):
+    def run(self, user_request, **kwargs):
+        if not self._operation_lock.acquire(blocking=False):
+            raise AgentCoreError("An Agent operation is already running.")
+        try:
+            return self._run(user_request, **kwargs)
+        except Exception as error:
+            if self._plan_execution is not None:
+                return self._plan_execution.fail(error)
+            raise
+        finally:
+            self._operation_lock.release()
+
+    def _run(self, user_request, *, conversation_context=None, relevant_memory=None, on_state=lambda state: None):
         """Run a finite complex plan or the lightweight single-decision route."""
         if not isinstance(user_request, str) or not user_request.strip():
             raise ValueError("Agent request must be non-empty text.")
 
         request = user_request.strip()
         self._pending_actions.clear()
+        self._result_cache.clear()
         self._plan_execution = None
+        self._route = route_request(request)
+        self._request_context = {"original_goal": request, "recent_conversation": conversation_context or [],
+                                 "relevant_memory": relevant_memory or []}
+        if self._route == "normal":
+            self.state = "COMPLETE"
+            return _agent_result([])
         try:
             from .agent_plan import PlanExecution, needs_plan
         except ImportError:
             from agent_plan import PlanExecution, needs_plan
-        if should_use_agent(request) and needs_plan(request) and hasattr(self.planner, "plan"):
+        if self._route == "agent" and needs_plan(request) and hasattr(self.planner, "plan"):
             self._plan_execution = PlanExecution(
                 self, request, conversation_context, relevant_memory, on_state,
             )
@@ -265,6 +292,9 @@ class AgentCore:
                 LOGGER.debug("Tool result -> rejected | %s", error_message)
                 break
 
+            if self.cached_result(tool_name, arguments) is not None:
+                LOGGER.debug("Tool call -> cached; stop repeated routing | %s", tool_name)
+                break
             if metadata["requires_confirmation"]:
                 pending_confirmation = self._create_pending_action(
                     tool_name,
@@ -284,7 +314,7 @@ class AgentCore:
                 error_message = "Tool retry limit reached."
                 break
             try:
-                raw_result = self.registry.execute_tool(tool_name, arguments)
+                raw_result = self.execute_selected_tool(tool_name, arguments)
                 result = _bounded_json_value(raw_result)
             except (ToolArgumentError, ToolNotFoundError) as error:
                 record.update({"status": "rejected", "error": str(error)})
@@ -298,9 +328,13 @@ class AgentCore:
                 tool_calls.append(record)
                 error_message = str(error)
                 LOGGER.debug("Tool result -> error | %s", error_message)
+                if isinstance(error, AgentTimeoutError):
+                    break
                 continue
 
             record.update({"status": "ok", "result": result})
+            if call_key in failed_calls:
+                error_message = None
             tool_calls.append(record)
             LOGGER.debug(
                 "Tool result -> %s | %s",
@@ -313,7 +347,9 @@ class AgentCore:
         if len(tool_calls) >= self.max_tool_calls:
             limit_reached = True
         context = _format_agent_context(tool_calls, error_message)
+        self.state = "FAILED" if error_message else "WAITING_CONFIRMATION" if pending_confirmation else "COMPLETE"
         return {
+            "state": self.state,
             "tool_calls": tool_calls,
             "context": context,
             "limit_reached": limit_reached,
@@ -322,6 +358,14 @@ class AgentCore:
         }
 
     def confirm_action(self, confirmation_id, approved):
+        if not self._operation_lock.acquire(blocking=False):
+            raise AgentConfirmationError("An Agent operation is already running.")
+        try:
+            return self._confirm_action(confirmation_id, approved)
+        finally:
+            self._operation_lock.release()
+
+    def _confirm_action(self, confirmation_id, approved):
         """Resolve one frozen pending action exactly once."""
         if not isinstance(confirmation_id, str) or not confirmation_id.strip():
             raise AgentConfirmationError("Confirmation ID must be non-empty text.")
@@ -336,6 +380,7 @@ class AgentCore:
                 "The pending Agent action is missing, expired, or already resolved."
             )
 
+        LOGGER.debug("Confirmation -> %s | %s", approved, pending["tool"])
         if self._plan_execution is not None:
             return self._plan_execution.resume(pending, approved)
 
@@ -343,14 +388,18 @@ class AgentCore:
             "tool": pending["tool"],
             "arguments": pending["arguments"],
         }
+        control = getattr(self, "_task_control", None)
+        if control is not None and control.cancelled:
+            approved = False
         if not approved:
             record["status"] = "cancelled"
+            self.state = "CANCELLED"
             LOGGER.debug("Tool result -> cancelled | %s", pending["tool"])
             return _agent_result([record])
 
         LOGGER.debug("Tool confirmed -> %s", pending["tool"])
         try:
-            raw_result = self.registry.execute_tool(
+            raw_result = self.execute_selected_tool(
                 pending["tool"],
                 pending["arguments"],
                 confirmed=True,
@@ -358,10 +407,12 @@ class AgentCore:
             result = _bounded_json_value(raw_result)
         except (ToolRegistryError, ValueError) as error:
             record.update({"status": "error", "error": str(error)})
+            self.state = "FAILED"
             LOGGER.debug("Tool result -> error | %s", error)
             return _agent_result([record], error_message=str(error))
 
         record.update({"status": "ok", "result": result})
+        self.state = "COMPLETE"
         LOGGER.debug(
             "Tool result -> %s | %s",
             pending["tool"],
@@ -380,13 +431,45 @@ class AgentCore:
         self._pending_actions[confirmation_id] = pending
         return copy.deepcopy(pending)
 
+    def cached_result(self, name, arguments):
+        key = json.dumps([name, arguments], sort_keys=True, ensure_ascii=False)
+        return copy.deepcopy(self._result_cache.get(key))
+
+    def execute_selected_tool(self, name, arguments, *, confirmed=False):
+        metadata = self.registry.validate_tool_call(name, arguments)
+        registry = self.registry
+        result = call_with_timeout(
+            lambda: registry.execute_tool(name, copy.deepcopy(arguments), confirmed=confirmed),
+            self.tool_timeout, name,
+        )
+        result = _bounded_json_value(result)
+        if not metadata["read_only"]:
+            self._result_cache = {key: value for key, value in self._result_cache.items() if not value["read_only"]}
+        key = json.dumps([name, arguments], sort_keys=True, ensure_ascii=False)
+        self._result_cache[key] = {"result": copy.deepcopy(result), "read_only": metadata["read_only"]}
+        return result
+
     def _decide(self, user_request, history):
         tools = self.registry.get_tools()
+        route = getattr(self, "_route", "agent")
+        if route == "knowledge":
+            tools = [tool for tool in tools if tool["name"] in {
+                "search_knowledge", "list_knowledge_files", "scan_knowledge_sources"}]
+        elif route == "memory":
+            tools = [tool for tool in tools if tool["name"] == "search_memory"]
+        self._allowed_decisions = {tool["name"] for tool in tools}
+        history = copy.deepcopy(history) + [{
+            "original_goal": user_request,
+            "recent_conversation": _truncate_text(json.dumps(self._request_context["recent_conversation"][-6:], ensure_ascii=False), 6000),
+            "relevant_memory": _truncate_text(json.dumps(self._request_context["relevant_memory"], ensure_ascii=False), 2400),
+        }]
         if hasattr(self.planner, "decide"):
-            return self.planner.decide(user_request, tools, history)
-        if callable(self.planner):
-            return self.planner(user_request, tools, history)
-        raise AgentPlanningError("Agent planner must be callable.")
+            operation = lambda: self.planner.decide(user_request, tools, history)
+        elif callable(self.planner):
+            operation = lambda: self.planner(user_request, tools, history)
+        else:
+            raise AgentPlanningError("Agent planner must be callable.")
+        return call_with_timeout(operation, self.tool_timeout, "Agent decision")
 
     def _validate_decision(self, decision):
         if not isinstance(decision, dict) or set(decision) != {"tool", "arguments"}:
@@ -404,6 +487,8 @@ class AgentCore:
             return None, arguments
         if not isinstance(tool_name, str) or self.registry.get_tool(tool_name) is None:
             raise ToolNotFoundError(f"Tool '{tool_name}' is not registered.")
+        if self._plan_execution is None and tool_name not in getattr(self, "_allowed_decisions", {tool_name}):
+            raise ToolNotFoundError("Tool is not permitted for this request route.")
         if not isinstance(arguments, dict):
             raise ToolArgumentError("Tool arguments must be a JSON object.")
         return tool_name, arguments
@@ -414,14 +499,35 @@ class AgentCore:
         LOGGER.debug("Final response -> completed")
 
 
+def route_request(user_request):
+    """Conservative deterministic routing; follow-up prose stays normal chat."""
+    try:
+        from .agent_plan import needs_plan
+    except ImportError:
+        from agent_plan import needs_plan
+    text = user_request.strip() if isinstance(user_request, str) else ""
+    local = bool(_AGENT_TARGET_PATTERN.search(text) and _AGENT_ACTION_PATTERN.search(text))
+    definition = bool(re.match(r"(?:what (?:is|are)\b|define\b|explain\b|什么是|解释一下)", text, re.I))
+    explicit_local = bool(re.search(r"my |our |我的|我们的|知识库中|in (?:the )?knowledge base", text, re.I))
+    if not local or (definition and not explicit_local):
+        route = "normal"
+    elif re.search(r"what do you remember|search memory|查询记忆|检索记忆", text, re.I) and not needs_plan(text):
+        route = "memory"
+    elif needs_plan(text) or re.search(r"创建|新建|添加|保存|写入|更新|修改|完成|记住|\b(?:create|add|save|write|update|edit|complete|remember)\b", text, re.I):
+        route = "agent"
+    elif re.search(r"记忆|项目历史|\b(?:memory|memories|project history)\b", text, re.I):
+        route = "memory"
+    elif re.search(r"待办|\bto-?dos?\b", text, re.I):
+        route = "agent"
+    else:
+        route = "knowledge"
+    LOGGER.debug("Routing decision -> %s", route)
+    return route
+
+
 def should_use_agent(user_request):
-    """Bypass planning for ordinary chat without a local-data request."""
-    if not isinstance(user_request, str):
-        return False
-    return bool(
-        _AGENT_TARGET_PATTERN.search(user_request)
-        and _AGENT_ACTION_PATTERN.search(user_request)
-    )
+    """Compatibility guard for requests requiring any local tool context."""
+    return route_request(user_request) != "normal"
 
 
 def build_default_tool_registry():
@@ -738,6 +844,8 @@ def _format_agent_context(tool_calls, error_message):
 
 def _agent_result(tool_calls, error_message=None):
     return {
+        "state": "FAILED" if error_message else "CANCELLED" if any(
+            record.get("status") == "cancelled" for record in tool_calls) else "COMPLETE",
         "tool_calls": tool_calls,
         "context": _format_agent_context(tool_calls, error_message),
         "limit_reached": False,

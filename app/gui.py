@@ -238,6 +238,10 @@ class AgentTaskReceiver(QObject):
     def receive(self, snapshot):
         self.callback(snapshot)
 
+    @Slot()
+    def finish(self):
+        self.callback()
+
 
 class BackgroundWorker(QObject):
     """Run one blocking local operation outside the Qt GUI thread."""
@@ -1894,22 +1898,17 @@ class MainWindow(QMainWindow):
         thread.worker = worker
         thread.started.connect(worker.run)
 
-        if on_token:
-            worker.token.connect(on_token)
-        if on_progress:
-            worker.progress.connect(on_progress)
-        if on_state:
-            worker.state_changed.connect(on_state)
-        if on_task:
-            task_receiver = AgentTaskReceiver(on_task, self)
-            worker.task_updated.connect(task_receiver.receive, Qt.ConnectionType.QueuedConnection)
-            worker.finished.connect(task_receiver.deleteLater)
-        if on_success:
-            worker.succeeded.connect(on_success)
-        if on_error:
-            worker.failed.connect(on_error)
-        if on_finished:
-            worker.finished.connect(on_finished)
+        for signal, callback in ((worker.token, on_token), (worker.progress, on_progress),
+                                 (worker.state_changed, on_state), (worker.task_updated, on_task),
+                                 (worker.succeeded, on_success), (worker.failed, on_error)):
+            if callback is not None:
+                receiver = AgentTaskReceiver(callback, self)
+                signal.connect(receiver.receive, Qt.ConnectionType.QueuedConnection)
+                worker.finished.connect(receiver.deleteLater)
+        if on_finished is not None:
+            receiver = AgentTaskReceiver(on_finished, self)
+            worker.finished.connect(receiver.finish, Qt.ConnectionType.QueuedConnection)
+            worker.finished.connect(receiver.deleteLater)
 
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -2103,6 +2102,9 @@ class MainWindow(QMainWindow):
     def _agent_task_updated(self, snapshot):
         """Receive a copied task snapshot on the GUI thread, with no polling."""
         if self.current_chat_mode != "normal" or not self.current_ai_panel:
+            return
+        if (snapshot.get("task_id") and self.current_task_control is not None
+                and snapshot["task_id"] != self.current_task_control.task_id):
             return
         if self.current_task_panel is None:
             self.current_task_panel = AgentTaskPanel()

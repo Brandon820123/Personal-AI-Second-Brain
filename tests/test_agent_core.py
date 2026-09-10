@@ -132,7 +132,7 @@ class AgentCoreTests(unittest.TestCase):
         }])
         self.assertEqual(result["tool_calls"][0]["tool"], "search_memory")
 
-    def test_agent_executes_at_most_three_tools(self):
+    def test_agent_stops_repeating_successful_tool(self):
         calls = []
 
         def repeated_decision(user_request, tools, history):
@@ -149,9 +149,9 @@ class AgentCoreTests(unittest.TestCase):
             planner=repeated_decision,
         ).run("查询知识库")
 
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(len(result["tool_calls"]), 3)
-        self.assertTrue(result["limit_reached"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result["tool_calls"]), 1)
+        self.assertFalse(result["limit_reached"])
 
     def test_tool_exception_becomes_context_and_does_not_crash(self):
         def fail(**arguments):

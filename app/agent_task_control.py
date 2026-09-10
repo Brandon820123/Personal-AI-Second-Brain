@@ -2,6 +2,10 @@
 
 from threading import Event, Lock
 from uuid import uuid4
+import logging
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TaskCancellationError(RuntimeError):
@@ -17,6 +21,7 @@ class AgentTaskControl:
     def request_cancel(self):
         with self._boundary:
             self._cancelled.set()
+        LOGGER.debug("Cancel requested -> %s", self.task_id)
 
     @property
     def cancelled(self):

@@ -23,7 +23,11 @@ class Planner:
 
     def decide(self, goal, tools, history):
         self.contexts.append(history[0])
-        return {"tool": tools[0]["name"], "arguments": {"text": "Physics review"}}
+        index = history[1]["execute_step"]
+        previous = history[0]["current_plan"]["steps"][:index]
+        repeated = sum(step["tool"] == tools[0]["name"] for step in previous)
+        text = "Physics review" + (f" {repeated + 1}" if repeated else "")
+        return {"tool": tools[0]["name"], "arguments": {"text": text}}
 
 
 def step(tool, **kwargs):

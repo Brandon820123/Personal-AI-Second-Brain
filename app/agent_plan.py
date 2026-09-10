@@ -7,17 +7,21 @@ import re
 
 try:
     from .agent_task_control import TaskCancellationError
+    from .agent_runtime import AgentTimeoutError, call_with_timeout
 except ImportError:
     from agent_task_control import TaskCancellationError
+    from agent_runtime import AgentTimeoutError, call_with_timeout
 
 
 def needs_plan(request):
     """Recognize composed local tasks without planning ordinary questions."""
-    return bool(re.search(
-        r"并|然后|接着|总结|整理|归纳|[二三四五两2345].{0,4}(?:待办|任务)|"
-        r"\b(?:then|summarize|organize|and|three|two|four|five)\b",
-        request, re.IGNORECASE,
-    ))
+    read = re.search(r"搜索|查找|查询|检索|列出|查看|\b(?:search|find|query|list|look up)\b", request, re.I)
+    synthesize = re.search(r"总结|整理|归纳|\b(?:summarize|organize)\b", request, re.I)
+    write = re.search(r"创建|新建|更新|保存|完成|添加|\b(?:create|write|save|add|update|complete)\b", request, re.I)
+    multiple_todos = re.search(r"[二三四五两2345].{0,4}(?:待办|任务)|\b(?:two|three|four|five|[2-5])\s+.*(?:todos?|to-dos?|tasks?)", request, re.I)
+    return bool(sum(bool(value) for value in (read, synthesize, write)) >= 2
+                or multiple_todos or (synthesize and re.search(r"资料|知识库|materials?|knowledge base", request, re.I)))
+
 
 
 def _core():
@@ -44,7 +48,11 @@ class PlanExecution:
     def transition(self, state):
         self.state = state
         self.owner.state = state
-        self.on_state(state)
+        _core().LOGGER.debug("Task state -> %s", state)
+        try:
+            self.on_state(state)
+        except Exception:
+            _core().LOGGER.warning("Task state listener was unavailable.")
 
     def context(self):
         # All reference blocks are bounded independently; keep the goal and plan.
@@ -62,8 +70,9 @@ class PlanExecution:
         if self.cancel_if_requested():
             return self.result()
         try:
-            raw = self.owner.planner.plan(
-                self.goal, self.owner.registry.get_tools(), self.context(),
+            raw = call_with_timeout(
+                lambda: self.owner.planner.plan(self.goal, self.owner.registry.get_tools(), self.context()),
+                self.owner.tool_timeout, "Agent planning",
             )
             if self.cancel_if_requested():
                 return self.result()
@@ -87,6 +96,7 @@ class PlanExecution:
                     self.owner.registry.validate_tool_call(step["tool"], step["arguments"])
                 step.update(status="pending", attempts=0)
             self.plan["steps"] = copy.deepcopy(steps)
+            _core().LOGGER.debug("Plan -> %s", json.dumps(self.plan, ensure_ascii=False))
         except Exception as error:
             return self.fail(error)
         return self.advance()
@@ -95,6 +105,8 @@ class PlanExecution:
         if self.cancel_if_requested():
             return self.result()
         self.error = str(error)
+        self.pending = None
+        self.owner._pending_actions.clear()
         self.transition("FAILED")
         return self.result()
 
@@ -121,14 +133,13 @@ class PlanExecution:
             if self.cancel_if_requested():
                 return self.result()
             step = self.plan["steps"][self.index]
-            if self.count >= self.owner.max_tool_calls:
-                return self.fail("Tool call limit reached; remaining steps were not executed.")
             try:
                 if "arguments" not in step:
-                    decision = self.owner.planner.decide(
-                        self.goal,
-                        [self.owner.registry.get_tool(step["tool"])],
-                        [self.context(), {"execute_step": self.index}],
+                    context = [self.context(), {"execute_step": self.index}]
+                    decision = call_with_timeout(
+                        lambda: self.owner.planner.decide(self.goal,
+                            [self.owner.registry.get_tool(step["tool"])], context),
+                        self.owner.tool_timeout, "Step arguments",
                     )
                     name, arguments = self.owner._validate_decision(decision)
                     if name != step["tool"]:
@@ -137,6 +148,19 @@ class PlanExecution:
                 if self.cancel_if_requested():
                     return self.result()
                 metadata = self.owner.registry.validate_tool_call(step["tool"], step["arguments"])
+                cached = self.owner.cached_result(step["tool"], step["arguments"])
+                if cached is not None:
+                    step["status"] = "complete"
+                    step["result"] = cached["result"]
+                    self.calls.append({"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]),
+                                       "status": "ok", "result": cached["result"], "cached": True,
+                                       "step_index": self.index})
+                    _core().LOGGER.debug("Tool result -> cached | %s", step["tool"])
+                    self.transition("EXECUTING")
+                    self.index += 1
+                    continue
+                if self.count >= self.owner.max_tool_calls:
+                    return self.fail("Tool call limit reached; remaining steps were not executed.")
                 if metadata["requires_confirmation"]:
                     self.pending = self.owner._create_pending_action(
                         step["tool"], step["arguments"], metadata["description"],
@@ -151,6 +175,8 @@ class PlanExecution:
             if self.cancel_if_requested() or self.state == "FAILED":
                 return self.result()
             self.index += 1
+        if self.cancel_if_requested():
+            return self.result()
         self.transition("COMPLETE")
         return self.result()
 
@@ -166,12 +192,15 @@ class PlanExecution:
                 return self.fail("Tool call limit reached during retry.")
             self.count += 1
             step["attempts"] += 1
-            record = {"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"])}
+            record = {"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]), "step_index": self.index}
             try:
-                value = self.owner.registry.execute_tool(step["tool"], step["arguments"], confirmed=confirmed)
+                _core().LOGGER.debug("Tool call -> %s | %s", step["tool"], step["arguments"])
+                value = self.owner.execute_selected_tool(step["tool"], step["arguments"], confirmed=confirmed)
                 record.update(status="ok", result=_bounded_json_value(value))
                 self.calls.append(record)
                 step["status"] = "complete"
+                step["result"] = result = record["result"]
+                _core().LOGGER.debug("Tool result -> %s | %s", step["tool"], _core()._log_preview(result))
                 return
             except Exception as error:
                 if isinstance(error, TaskCancellationError):
@@ -181,6 +210,9 @@ class PlanExecution:
                 record.update(status="error", error=str(error))
                 self.calls.append(record)
                 step["status"] = "error"
+                if isinstance(error, AgentTimeoutError):
+                    self.fail(error)
+                    return
         if confirmed or step.get("critical", True):
             self.fail(f"Critical step {self.index + 1} ({step['tool']}) failed: {record['error']}")
 
