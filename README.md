@@ -152,6 +152,39 @@ never execute on the UI thread. Settings includes an opt-in startup scan, disabl
 by default. Startup scanning detects file changes only and never starts a large
 indexing operation without a separate user action.
 
+## Personal Knowledge Search MVP
+
+The Knowledge page has a global search field above the library/source tabs.
+Enter submits a query; PDF, DOCX, TXT and MD filters apply inside the existing
+Chroma collection before ranking. Search uses the existing local Ollama embedding
+model and returns up to 20 text hits, excluding standalone page-number chunks.
+Results display filename, path relative to the configured source folder, type,
+one-based PDF page, excerpt and relevance score (1 minus cosine distance).
+Hover over the filename/path for the complete source path.
+
+Selecting a result reads original context in the shared Qt background worker.
+PDF context reads only the hit page; display is bounded to the hit plus roughly
+2500 characters on either side. Missing or changed sources retain the indexed
+excerpt with a message to synchronize. Search errors are shown inline and can be
+retried. No answer generation or additional index is involved. Existing source
+folder addition, scan and synchronization actions remain available.
+The **知识库 / 来源** button switches between results and management so both
+views have enough space on a laptop screen.
+
+Knowledge startup is independent of conversation loading. Source configuration,
+scan, sync, import, re-index and deletion use background workers; knowledge writes
+are serialized within the desktop window. Refresh requests arriving during a
+load are replayed afterwards. Unchanged scanner records are skipped only if their
+source still exists in Chroma, so a later sync can restore a removed index.
+Search collapses identical hits from identical document copies, preferring an
+existing authorized source; original files and stored vectors are retained.
+Invalid scanner settings do not prevent searching existing vectors: paths fall
+back to being relative to the project (or absolute across different drives).
+
+Run focused checks with `.venv/Scripts/python.exe -m unittest
+tests.test_knowledge_search_mvp tests.test_vector_store tests.test_semantic_search
+tests.test_document_loader -v`.
+
 ## Phase 9A: Memory System v1 (Backend Only)
 
 `app/memory_store.py` persists deliberate long-term information in the local

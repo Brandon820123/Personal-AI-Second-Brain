@@ -39,13 +39,19 @@ def _validate_document_path(file_path):
     return path
 
 
-def _load_pdf_pages(path):
+def _load_pdf_pages(path, page_number=None):
     """Extract non-empty PDF pages locally with one-based page numbers."""
     try:
         reader = PdfReader(path)
         extracted_pages = []
 
-        for page_number, page in enumerate(reader.pages, start=1):
+        page_numbers = range(1, len(reader.pages) + 1)
+        if page_number is not None:
+            if not 1 <= page_number <= len(reader.pages):
+                raise ValueError("Indexed page no longer exists.")
+            page_numbers = [page_number]
+        for page_number in page_numbers:
+            page = reader.pages[page_number - 1]
             page_text = page.extract_text() or ""
 
             if page_text.strip():
@@ -99,12 +105,12 @@ def _load_docx_sections(path):
     return [{"text": "\n\n".join(paragraphs), "page_number": None}]
 
 
-def load_document_pages(file_path):
+def load_document_pages(file_path, page_number=None):
     """Return document text sections with optional PDF page numbers."""
     path = _validate_document_path(file_path)
 
     if path.suffix.lower() == ".pdf":
-        return _load_pdf_pages(path)
+        return _load_pdf_pages(path, page_number=page_number)
 
     if path.suffix.lower() == ".docx":
         return _load_docx_sections(path)

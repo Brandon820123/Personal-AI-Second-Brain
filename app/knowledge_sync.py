@@ -69,8 +69,7 @@ def sync_new_documents(
     try:
         known_documents = list_documents_function()
     except Exception as error:
-        known_documents = []
-        log_function(f"Knowledge library lookup warning: {error}")
+        raise RuntimeError(f"Could not read knowledge library before synchronization: {error}") from error
 
     for root in roots:
         root_path = Path(root).expanduser().resolve()
@@ -116,7 +115,9 @@ def sync_new_documents(
         for record in scan_result["unchanged_files"]:
             indexed_record = indexed_by_path.get(_comparison_path(record["path"]), {})
 
-            if indexed_record.get("processed", False):
+            if indexed_record.get("processed", False) and _find_existing_document(
+                record, indexed_record, known_documents
+            ) is not None:
                 summary["skipped"].append(record)
             else:
                 candidates.append(("pending", record))
@@ -203,9 +204,9 @@ def sync_new_documents(
                     _update_index_record(
                         record["path"],
                         index_path=index_path,
-                    processed=False,
-                    last_error=str(error),
-                    scan_status="failed",
+                        processed=False,
+                        last_error=str(error),
+                        scan_status="failed",
                     )
                 except Exception as index_error:
                     log_function(f"Index status warning: {index_error}")

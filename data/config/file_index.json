@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "last_scan_time": "2026-09-08T01:46:40.787630+00:00",
+  "last_scan_time": "2026-09-15T07:10:58.111705+00:00",
   "scans": {
-    "D:/Learning_profile": "2026-09-08T01:46:40.787630+00:00"
+    "D:/Learning_profile": "2026-09-15T07:10:58.111705+00:00"
   },
   "files": [
     {
@@ -15,7 +15,8 @@
       "processed": true,
       "knowledge_id": "ed572171a8601d78e6b3e8e1e4e5be5a0eaae88ed7bb2f63a03c261371c6a891",
       "last_indexed": "2026-09-08T01:46:53.902166+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.1.3_update (1).pdf",
@@ -27,7 +28,8 @@
       "processed": true,
       "knowledge_id": "0cb70be72b68b7be2a2831fc419e4cbbd62e4808c12dd38e09e3fe21ec01b118",
       "last_indexed": "2026-09-08T01:47:00.007149+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.1.5_update (1).pdf",
@@ -39,7 +41,8 @@
       "processed": true,
       "knowledge_id": "ba27c440e2ba4b56021a05c94b88d0a467b439a2dd7955a56fc1e68171ed7b2e",
       "last_indexed": "2026-09-08T01:47:03.447176+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.1.6_update (1).pdf",
@@ -51,7 +54,8 @@
       "processed": true,
       "knowledge_id": "680ed0b31a3063ddb9cca5d907764a06eb6e7a8a11a00a37c2d3ca9b6f05c063",
       "last_indexed": "2026-09-08T01:47:07.999678+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.1.7_update (1).pdf",
@@ -63,7 +67,8 @@
       "processed": true,
       "knowledge_id": "d25bff636cc989bdba3255f777e7b2641c04d34323269a922ee2906f19d78fc3",
       "last_indexed": "2026-09-08T01:47:13.780668+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.1.9 (1).pdf",
@@ -75,7 +80,8 @@
       "processed": true,
       "knowledge_id": "365acca2a85ced3cd2a33495dd7bf5063eff7ec011b631a940b794d26fc99f8e",
       "last_indexed": "2026-09-08T01:47:21.144739+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.2.2_update (1).pdf",
@@ -87,7 +93,8 @@
       "processed": true,
       "knowledge_id": "a44397bc6adb91f5bd1cc93ed10f76b986fc3472ff8972b4c77bdd2d02ef8153",
       "last_indexed": "2026-09-08T01:47:37.684716+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.2.3 (1).pdf",
@@ -99,7 +106,8 @@
       "processed": true,
       "knowledge_id": "1d6fff25f33578f256878c8fe52a0831b2c17d039a827de00e80b5dabf9515e8",
       "last_indexed": "2026-09-08T01:47:42.662257+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.2.4 (1).pdf",
@@ -111,7 +119,8 @@
       "processed": true,
       "knowledge_id": "361b7b6319e621b9b8ac23be7b4a0cde849b821668c93a593dcd367b28e6c992",
       "last_indexed": "2026-09-08T01:47:44.747960+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.2.5 (1).pdf",
@@ -123,7 +132,8 @@
       "processed": true,
       "knowledge_id": "534ce701ff7b145f08e9ad02b38f3178d62bddeddbbaf7e74f1602c0ae42d8ea",
       "last_indexed": "2026-09-08T01:47:46.320211+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.1 (6).pdf",
@@ -135,7 +145,8 @@
       "processed": true,
       "knowledge_id": "3b6759b770134c554055eabf39e816be839572977c601a139bb0b695d8008ec4",
       "last_indexed": "2026-09-08T01:47:49.149650+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.2 (8).pdf",
@@ -147,7 +158,8 @@
       "processed": true,
       "knowledge_id": "2f9247376a71c08a0cbe2b2c7f503ce440375369f552605169feebe1dc530782",
       "last_indexed": "2026-09-08T01:48:08.341657+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.3 (6).pdf",
@@ -159,7 +171,8 @@
       "processed": true,
       "knowledge_id": "24b3d3b0d1c4fb2b12a1fc36cfccec3cab57b38496ea896cc2d9323dc2c163bd",
       "last_indexed": "2026-09-08T01:48:17.056912+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.4 (4).pdf",
@@ -171,7 +184,8 @@
       "processed": true,
       "knowledge_id": "2ca1c4a759a930f64e9b326c1db3bc4cd9c448dde56a3f5a8ac85c311278e6c9",
       "last_indexed": "2026-09-08T01:48:23.266385+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.5 (3).pdf",
@@ -183,7 +197,8 @@
       "processed": true,
       "knowledge_id": "eba35395f589e7da42a99226de5f49e8f7ab1f781b469dfeeccc0921f4e8779a",
       "last_indexed": "2026-09-08T01:48:33.085436+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.6 (6).pdf",
@@ -195,7 +210,8 @@
       "processed": true,
       "knowledge_id": "863b890fe46e460eaeab6ccd23da29b78fa07a9ea9808606fb1fb9872033de4b",
       "last_indexed": "2026-09-08T01:48:42.226681+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.3.7 (4).pdf",
@@ -207,7 +223,8 @@
       "processed": true,
       "knowledge_id": "4952d83db632ea827be5d39159ae8325981e7d43d6c3297d5e11acb0c079b271",
       "last_indexed": "2026-09-08T01:48:51.996580+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/A1.4.1_update (3).pdf",
@@ -219,7 +236,8 @@
       "processed": true,
       "knowledge_id": "cd717ce7fc95bd295987f538e262d69546240b62f55c6103f639ea18e1dd45ab",
       "last_indexed": "2026-09-08T01:48:57.310128+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/B1 (3).pdf",
@@ -231,7 +249,8 @@
       "processed": true,
       "knowledge_id": "b7cee97c19e86630c2db7b506900179cc08c44500ee6c4a3d71fcb11544f3486",
       "last_indexed": "2026-09-08T01:49:07.133066+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/B1 (4).pdf",
@@ -243,7 +262,8 @@
       "processed": true,
       "knowledge_id": "dbd67ffc5befb9ecdb0bc270a8d797ca1d7cd0b2cdd829f47c7eedc5fdc0ee5e",
       "last_indexed": "2026-09-08T01:49:15.546167+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/B2.1_Part1_ (3).pdf",
@@ -255,7 +275,8 @@
       "processed": true,
       "knowledge_id": "3dd6d81eaadb5bad2b0b60b10a6d9d4a1f9ddcec448eb56fe91dfb270e7d089c",
       "last_indexed": "2026-09-08T01:49:25.613118+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/Computer_Science/B2.1_Part1_ (4).pdf",
@@ -267,7 +288,8 @@
       "processed": true,
       "knowledge_id": "02cc1c63880fb42d3fd57db5ddf94ea4d7c7f6b6f4595acc6a791b4419605245",
       "last_indexed": "2026-09-08T01:49:35.917327+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     },
     {
       "path": "D:/Learning_profile/physics/Textbook.pdf",
@@ -279,7 +301,8 @@
       "processed": true,
       "knowledge_id": "b711bdc1a4c4cc2f2d1b6799afa7a23acce3bfe5f3aa425a730acc2517798cf4",
       "last_indexed": "2026-09-08T02:00:26.488289+00:00",
-      "scan_status": "indexed"
+      "scan_status": "indexed",
+      "last_error": null
     }
   ]
 }

@@ -219,7 +219,7 @@ class VectorStore:
 
         return len(stale_ids)
 
-    def search(self, query_embedding, top_k=3):
+    def search(self, query_embedding, top_k=3, file_type=None):
         """Return the nearest stored chunks with metadata and cosine distance."""
         if not query_embedding:
             raise ValueError("Query embedding must not be empty.")
@@ -232,10 +232,12 @@ class VectorStore:
             if stored_count == 0:
                 return []
 
+            filters = {} if file_type is None else {"where": {"file_type": file_type}}
             query_results = self.collection.query(
                 query_embeddings=[query_embedding],
                 n_results=min(top_k, stored_count),
                 include=["documents", "metadatas", "distances"],
+                **filters,
             )
         except Exception as error:
             raise VectorStoreError(

@@ -141,6 +141,16 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertTrue(records["good.txt"]["processed"])
         self.assertIn("Sync completed.", self.logs)
 
+    def test_sync_restores_missing_index_even_when_scanner_says_processed(self):
+        document = self.root / "notes.md"
+        document.write_text("stable", encoding="utf-8")
+        self.sync()
+        self.library.documents.clear()
+        result = self.sync()
+        self.assertEqual(len(result["imported"]), 1)
+        self.assertEqual(len(self.library.import_calls), 2)
+        self.assertEqual(len(self.sync()["skipped"]), 1)
+
     def test_failed_file_is_retried_even_when_its_hash_is_unchanged(self):
         document = self.root / "retry.txt"
         document.write_text("retry me", encoding="utf-8")
@@ -156,6 +166,7 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertIn("Pending document retry:", self.logs)
 
     def test_sync_uses_existing_pipeline_to_create_real_knowledge_records(self):
+        (self.root / "aaa-broken.pdf").write_bytes(b"invalid PDF")
         document = self.root / "actual.txt"
         document.write_text("First topic.\n\nSecond topic.", encoding="utf-8")
         store = VectorStore(
@@ -196,6 +207,7 @@ class KnowledgeSyncTests(unittest.TestCase):
             documents = list_documents(store)
 
             self.assertEqual(len(result["imported"]), 1)
+            self.assertEqual(len(result["failed"]), 1)
             self.assertEqual(len(documents), 1)
             self.assertEqual(documents[0]["filename"], "actual.txt")
             self.assertGreater(documents[0]["chunk_count"], 0)

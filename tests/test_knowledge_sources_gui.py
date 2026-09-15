@@ -3,6 +3,7 @@
 import gc
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -79,8 +80,18 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
             active_patch.start()
 
         self.window = gui.MainWindow()
+        self.window.refresh_knowledge_sources()
+        self._wait_for_workers()
+
+    def _wait_for_workers(self):
+        deadline = time.monotonic() + 5
+        while self.window.worker_threads and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.assertFalse(self.window.worker_threads)
 
     def tearDown(self):
+        self._wait_for_workers()
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
@@ -128,6 +139,36 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
         ]
         self.assertEqual(visible_names, ["broken.pdf"])
 
+    def test_refresh_requested_during_load_is_not_lost(self):
+        snapshot = self.window._load_source_snapshot()
+
+        def delayed_snapshot():
+            time.sleep(0.05)
+            return snapshot
+
+        with patch.object(self.window, "_load_source_snapshot", side_effect=delayed_snapshot) as load:
+            self.window.refresh_knowledge_sources("old status")
+            self.window.refresh_knowledge_sources("latest status")
+            self._wait_for_workers()
+            self.assertEqual(load.call_count, 2)
+        self.assertEqual(self.window.source_progress.text(), "latest status")
+
+    def test_overlapping_roots_do_not_duplicate_file_rows(self):
+        self.scanner_config["watch_folders"].append((self.root / "math").as_posix())
+        self.window.refresh_knowledge_sources()
+        self._wait_for_workers()
+        self.assertEqual(self.window.source_file_table.rowCount(), 4)
+        self.assertEqual(self.window.source_summary_values["files"].text(), "4")
+
+    def test_knowledge_startup_does_not_depend_on_conversation_initialization(self):
+        with patch.object(self.window, "_initialize_task_history",
+                          side_effect=lambda: self.window._conversation_failed("unavailable")):
+            self.window.show()
+            self.app.processEvents()
+            self._wait_for_workers()
+        self.assertEqual(self.window.knowledge_ready_status.text(), "Knowledge: Ready")
+        self.assertEqual(self.window.source_file_table.rowCount(), 4)
+
     def test_add_and_remove_are_explicit_and_removal_keeps_source_file(self):
         added_folder = Path(self.temporary_directory.name) / "New_Source"
         added_folder.mkdir()
@@ -141,6 +182,7 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
             patch("app.gui.add_watch_folder", return_value=True) as add_folder,
         ):
             self.window.choose_knowledge_source_folder()
+            self._wait_for_workers()
 
         add_folder.assert_called_once_with(str(added_folder))
         source_file = Path(self.records[0]["path"])
@@ -154,11 +196,13 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
             patch("app.gui.remove_watch_folder", return_value=True) as remove_folder,
         ):
             self.window.remove_knowledge_source(self.root.as_posix())
+            self._wait_for_workers()
 
         remove_folder.assert_called_once_with(self.root.as_posix())
         self.assertTrue(source_file.is_file())
 
     def test_scan_and_sync_actions_use_worker_callbacks_and_restore_buttons(self):
+        run_worker = self.window._run_worker
         scan_result = {
             "results": [],
             "errors": [],
@@ -169,6 +213,8 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
         }
 
         def finish_scan(operation, **callbacks):
+            if operation is not gui.scan_authorized_sources:
+                return run_worker(operation, **callbacks)
             self.assertIs(operation, gui.scan_authorized_sources)
             callbacks["on_progress"]("正在扫描：测试目录")
             callbacks["on_success"](scan_result)
@@ -189,6 +235,8 @@ class KnowledgeSourcesGuiTests(unittest.TestCase):
         }
 
         def finish_sync(operation, **callbacks):
+            if operation is not gui.synchronize_authorized_sources:
+                return run_worker(operation, **callbacks)
             self.assertIs(operation, gui.synchronize_authorized_sources)
             callbacks["on_progress"]("Progress: 1 / 2")
             callbacks["on_success"](sync_result)

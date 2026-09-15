@@ -145,6 +145,8 @@ stream_confirmed_agent_action = _lazy_operation("ai_service", "stream_confirmed_
 list_documents = _lazy_operation("knowledge_library", "list_documents")
 delete_document = _lazy_operation("knowledge_library", "delete_document")
 sync_new_documents = _lazy_operation("knowledge_sync", "sync_new_documents")
+search_knowledge = _lazy_operation("semantic_search", "search_knowledge")
+load_search_context = _lazy_operation("semantic_search", "load_search_context")
 
 
 def run_persisted_chat(store, conversation_id, operation, message, *args,
@@ -432,7 +434,10 @@ class MainWindow(QMainWindow):
         self.conversation_context = []
         self._startup_started = False
         self._library_loading = False
+        self._library_refresh_pending = False
         self._sources_loading = False
+        self._sources_refresh_pending = None
+        self.knowledge_operation_busy = False
         self._source_connections = {}
         self.active_persona = get_active_persona(reload=True)
         self.active_language = get_language_preference(reload=True)
@@ -502,6 +507,8 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not self._startup_started:
             self._startup_started = True
+            QTimer.singleShot(0, self, self.refresh_library)
+            QTimer.singleShot(0, self, self.refresh_knowledge_sources)
             QTimer.singleShot(0, self, self._initialize_task_history)
 
     def _initialize_task_history(self):
@@ -563,8 +570,6 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_background_started", False):
             self._background_started = True
             self._run_health_check()
-            self.refresh_library()
-            self.refresh_knowledge_sources()
             self._run_worker(AgentCore, on_success=self._agent_ready,
                              on_error=lambda message: self.agent_status.setText(f"Agent: Error — {message}"))
             self._sync_cloud_files()
@@ -851,7 +856,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(34, 28, 34, 28)
         layout.setSpacing(14)
 
-        title = QLabel("知识管理")
+        title = QLabel("资料查询")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
             "Personal AI 仅扫描您主动添加的文件夹；本地知识与云端缓存相互独立。"
@@ -861,6 +866,57 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
 
         self.knowledge_tabs = QTabWidget()
+        self.search_results = []
+        self.search_busy = False
+        self.context_busy = False
+        self.context_generation = 0
+        search_bar = QHBoxLayout()
+        self.knowledge_search = QLineEdit()
+        self.knowledge_search.setPlaceholderText("全局搜索已索引资料：physics / math / Computer Science…")
+        self.knowledge_search.setMinimumHeight(44)
+        self.search_type = QComboBox()
+        for label, value in (("全部类型", None), ("PDF", ".pdf"),
+                             ("DOCX", ".docx"), ("TXT", ".txt"), ("MD", ".md")):
+            self.search_type.addItem(label, value)
+        self.search_button = QPushButton("搜索资料")
+        self.search_button.setObjectName("primaryButton")
+        self.search_button.clicked.connect(self.search_knowledge_documents)
+        self.knowledge_management_button = QPushButton("知识库 / 来源")
+        self.knowledge_management_button.setCheckable(True)
+        self.knowledge_management_button.setChecked(True)
+        self.knowledge_management_button.toggled.connect(self._toggle_knowledge_management)
+        self.knowledge_search.returnPressed.connect(self.search_knowledge_documents)
+        self.search_type.currentIndexChanged.connect(self.search_knowledge_documents)
+        search_bar.addWidget(self.knowledge_search, 1)
+        search_bar.addWidget(self.search_type)
+        search_bar.addWidget(self.search_button)
+        search_bar.addWidget(self.knowledge_management_button)
+        layout.addLayout(search_bar)
+        self.search_status = QLabel("输入关键词并按 Enter。搜索范围为全部已索引资料。")
+        self.search_status.setWordWrap(True)
+        layout.addWidget(self.search_status)
+        self.search_table = QTableWidget(0, 6)
+        self.search_table.setHorizontalHeaderLabels(
+            ["文件名", "相对路径", "类型", "PDF 页码", "命中内容片段", "Relevance\nscore"])
+        self.search_table.verticalHeader().setVisible(False)
+        self.search_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.search_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.search_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.search_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.search_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.search_table.setColumnWidth(0, 190)
+        self.search_table.setColumnWidth(1, 220)
+        self.search_table.setColumnWidth(2, 60)
+        self.search_table.setColumnWidth(3, 100)
+        self.search_table.setColumnWidth(5, 120)
+        self.search_table.verticalHeader().setDefaultSectionSize(76)
+        self.search_table.itemSelectionChanged.connect(self.expand_search_result)
+        self.search_table.setVisible(False)
+        layout.addWidget(self.search_table, 2)
+        self.search_context = QPlainTextEdit()
+        self.search_context.setReadOnly(True)
+        self.search_context.setVisible(False)
+        layout.addWidget(self.search_context, 1)
         self.knowledge_tabs.setObjectName("knowledgeTabs")
         library_tab = QWidget()
         library_layout = QVBoxLayout(library_tab)
@@ -925,6 +981,94 @@ class MainWindow(QMainWindow):
         self.knowledge_tabs.addTab(self._build_sources_tab(), "知识来源")
         layout.addWidget(self.knowledge_tabs, 1)
         return page
+
+    def _toggle_knowledge_management(self, visible):
+        """Give search results and source management their own full-height view."""
+        self.knowledge_tabs.setVisible(visible)
+        self.search_table.setVisible(not visible)
+        self.search_context.setVisible(not visible and bool(self.search_context.toPlainText()))
+
+    def search_knowledge_documents(self, *unused):
+        """Run embedding and Chroma retrieval through the shared worker lifecycle."""
+        if self.search_busy:
+            return
+        query = self.knowledge_search.text().strip()
+        self.context_generation += 1
+        self.search_results = []
+        self.search_table.setRowCount(0)
+        self.search_context.hide()
+        self.search_context.clear()
+        if not query:
+            self.search_status.setText("请输入搜索关键词。")
+            self.search_table.hide()
+            return
+        self.search_busy = True
+        self.knowledge_management_button.setChecked(False)
+        self.search_button.setEnabled(False)
+        self.search_type.setEnabled(False)
+        self.knowledge_search.setEnabled(False)
+        self.search_table.show()
+        self.search_status.setText("正在搜索本地资料…")
+        self._run_worker(
+            search_knowledge, query, file_type=self.search_type.currentData(),
+            on_success=self._search_results_loaded,
+            on_error=lambda message: self.search_status.setText(f"搜索失败：{message}"),
+            on_finished=self._search_finished,
+        )
+
+    def _search_finished(self):
+        self.search_busy = False
+        self.search_button.setEnabled(True)
+        self.search_type.setEnabled(True)
+        self.knowledge_search.setEnabled(True)
+
+    def _search_results_loaded(self, results):
+        self.search_results = results
+        self.search_table.setRowCount(len(results))
+        for row, result in enumerate(results):
+            metadata = result["metadata"]
+            values = [metadata.get("source_filename", ""), result["relative_path"],
+                      metadata.get("file_type", "").lstrip(".").upper(),
+                      str(metadata.get("page_number", "—")),
+                      " ".join(result["text"].split())[:320], f"{result['score']:.4f}"]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(metadata.get("source_path", "") if column < 2 else value)
+                self.search_table.setItem(row, column, item)
+        self.search_status.setText(
+            f"返回 {len(results)} 个最相关片段（最多 20）。点击结果展开原文；score 为余弦相似度，越高越相关。"
+            if results else "没有匹配的已索引资料。请检查类型筛选，或在知识来源中扫描并同步。")
+
+    def expand_search_result(self):
+        """Read one original source at a time and discard obsolete responses."""
+        self.context_generation += 1
+        if self.context_busy:
+            return
+        row = self.search_table.currentRow()
+        if row < 0 or row >= len(self.search_results):
+            return
+        generation = self.context_generation
+        result = self.search_results[row]
+        self.context_busy = True
+        self.search_context.setVisible(not self.knowledge_management_button.isChecked())
+        self.search_context.setPlainText("正在读取原文上下文…")
+
+        def loaded(text):
+            if generation == self.context_generation:
+                metadata = result["metadata"]
+                label = metadata.get("source_path", "")
+                if metadata.get("page_number") is not None:
+                    label += f" · PDF 第 {metadata['page_number']} 页"
+                self.search_context.setPlainText(label + "\n\n" + text)
+
+        def finished():
+            self.context_busy = False
+            if generation != self.context_generation:
+                self.expand_search_result()
+
+        self._run_worker(load_search_context, result, on_success=loaded,
+                         on_error=lambda message: loaded(f"读取失败：{message}"),
+                         on_finished=finished)
 
     def _build_sources_tab(self):
         tab = QWidget()
@@ -2262,11 +2406,18 @@ class MainWindow(QMainWindow):
 
     def refresh_library(self):
         if self._library_loading:
+            self._library_refresh_pending = True
             return
         self._library_loading = True
         self._run_worker(list_documents, on_success=self._library_loaded,
                          on_error=lambda message: self.knowledge_ready_status.setText(f"Knowledge: Error — {message}"),
-                         on_finished=lambda: setattr(self, "_library_loading", False))
+                         on_finished=self._library_refresh_finished)
+
+    def _library_refresh_finished(self):
+        self._library_loading = False
+        if self._library_refresh_pending:
+            self._library_refresh_pending = False
+            self.refresh_library()
 
     def _library_loaded(self, documents):
         self.documents = documents
@@ -2293,18 +2444,27 @@ class MainWindow(QMainWindow):
     def refresh_knowledge_sources(self, status_message=None):
         """Read persisted sources in a worker; never scan folders at startup."""
         if self._sources_loading:
+            self._sources_refresh_pending = (status_message,)
             return
         self._sources_loading = True
         self._run_worker(self._load_source_snapshot,
                          on_success=lambda result: self._sources_loaded(result, status_message),
                          on_error=lambda message: self.source_progress.setText(f"Knowledge Sources: Error — {message}"),
-                         on_finished=lambda: setattr(self, "_sources_loading", False))
+                         on_finished=self._source_refresh_finished)
+
+    def _source_refresh_finished(self):
+        self._sources_loading = False
+        pending = self._sources_refresh_pending
+        self._sources_refresh_pending = None
+        if pending is not None:
+            self.refresh_knowledge_sources(pending[0])
 
     def _load_source_snapshot(self):
         settings = load_scanner_config()
         index = load_file_index()
         source_rows = []
         visible_records = []
+        visible_paths = set()
 
         for folder in settings["watch_folders"]:
             root = Path(folder).expanduser().resolve()
@@ -2316,7 +2476,10 @@ class MainWindow(QMainWindow):
             source_rows.append((root, records, self._source_last_scan(index, root)))
 
             for record in records:
-                visible_records.append(self._source_display_record(record, root))
+                key = os.path.normcase(str(Path(record["path"]).resolve()))
+                if key not in visible_paths:
+                    visible_paths.add(key)
+                    visible_records.append(self._source_display_record(record, root))
 
         indexed_count = sum(record["status"] == "已索引" for record in visible_records)
         failed_count = sum(record["status"] == "失败" for record in visible_records)
@@ -2397,7 +2560,7 @@ class MainWindow(QMainWindow):
             remove_button.clicked.connect(
                 lambda checked=False, path=root.as_posix(): self.remove_knowledge_source(path)
             )
-            remove_button.setDisabled(self.source_operation_busy)
+            remove_button.setDisabled(self.source_operation_busy or self.knowledge_operation_busy)
             self.source_folder_table.setCellWidget(row, 7, remove_button)
             self.source_remove_buttons.append(remove_button)
 
@@ -2467,6 +2630,8 @@ class MainWindow(QMainWindow):
             )
 
     def choose_knowledge_source_folder(self):
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
         selected_folder = QFileDialog.getExistingDirectory(
             self,
             "选择允许 Personal AI 扫描的文件夹",
@@ -2476,20 +2641,18 @@ class MainWindow(QMainWindow):
         if not selected_folder:
             return
 
-        try:
-            added = add_watch_folder(selected_folder)
-        except (FileScannerError, OSError, ValueError) as error:
-            self.source_progress.setText(f"无法添加知识来源：{error}")
-            return
-
-        if added:
-            self.refresh_knowledge_sources(
-                f"已授权：{Path(selected_folder).resolve().as_posix()}"
-            )
-        else:
-            self.source_progress.setText("该文件夹已在知识来源中。")
+        self._start_source_operation("正在添加知识来源…")
+        self._run_worker(
+            add_watch_folder, selected_folder,
+            on_success=lambda added: self.refresh_knowledge_sources(
+                f"已授权：{selected_folder}" if added else "该文件夹已在知识来源中。"),
+            on_error=self._source_operation_failed,
+            on_finished=self._finish_source_operation,
+        )
 
     def remove_knowledge_source(self, folder_path):
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
         answer = QMessageBox.question(
             self,
             "移除知识来源",
@@ -2502,17 +2665,19 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        try:
-            removed = remove_watch_folder(folder_path)
-        except (FileScannerError, OSError, ValueError) as error:
-            self.source_progress.setText(f"无法移除知识来源：{error}")
-            return
-
-        if removed:
-            self.refresh_knowledge_sources("已取消该目录的自动扫描授权；原文件和已有索引均已保留。")
+        self._start_source_operation("正在移除知识来源…")
+        self._run_worker(
+            remove_watch_folder, folder_path,
+            on_success=lambda removed: self.refresh_knowledge_sources(
+                "已取消该目录的自动扫描授权；原文件和已有索引均已保留。"),
+            on_error=self._source_operation_failed,
+            on_finished=self._finish_source_operation,
+        )
 
     def scan_knowledge_sources(self, checked=False, startup=False):
         del checked
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
 
         if not self.scanner_settings["watch_folders"]:
             self.source_progress.setText("请先添加一个知识文件夹。")
@@ -2532,6 +2697,8 @@ class MainWindow(QMainWindow):
 
     def sync_knowledge_sources(self, checked=False):
         del checked
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
 
         if not self.scanner_settings["watch_folders"]:
             self.source_progress.setText("请先添加一个知识文件夹。")
@@ -2548,6 +2715,8 @@ class MainWindow(QMainWindow):
 
     def scan_and_sync_knowledge_sources(self, checked=False):
         del checked
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
 
         if not self.scanner_settings["watch_folders"]:
             self.source_progress.setText("请先添加一个知识文件夹。")
@@ -2609,6 +2778,10 @@ class MainWindow(QMainWindow):
 
     def _set_sources_busy(self, busy):
         self.source_operation_busy = bool(busy)
+        self._update_knowledge_operation_buttons()
+
+    def _update_knowledge_operation_buttons(self):
+        busy = self.source_operation_busy or self.knowledge_operation_busy
 
         for button in (
             self.add_source_button,
@@ -2616,8 +2789,11 @@ class MainWindow(QMainWindow):
             self.sync_sources_button,
             self.scan_sync_sources_button,
             *getattr(self, "source_remove_buttons", []),
+            self.import_button,
+            self.delete_button,
+            self.reindex_button,
         ):
-            button.setDisabled(self.source_operation_busy)
+            button.setDisabled(busy)
 
     def _scan_on_startup_setting_changed(self, checked):
         try:
@@ -2743,6 +2919,8 @@ class MainWindow(QMainWindow):
         self.cloud_refresh_button.setDisabled(False)
 
     def choose_import_file(self):
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "导入本地文档",
@@ -2780,6 +2958,8 @@ class MainWindow(QMainWindow):
         return self.documents[row]
 
     def delete_selected_document(self):
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
         document = self._selected_document()
 
         if not document:
@@ -2797,16 +2977,18 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        try:
-            count = delete_document(document["source_id"])
-        except Exception as error:
-            self._show_error(str(error))
-            return
-
-        self.refresh_library()
-        self.knowledge_status.setText(f"已删除 {document['filename']} 的 {count} 个 Chunk。")
+        self._set_knowledge_busy(True)
+        self._run_worker(
+            delete_document, document["source_id"],
+            on_success=lambda count: self._knowledge_operation_succeeded(
+                f"已删除 {document['filename']} 的 {count} 个 Chunk。"),
+            on_error=self._knowledge_operation_failed,
+            on_finished=lambda: self._set_knowledge_busy(False),
+        )
 
     def reindex_selected_document(self):
+        if self.source_operation_busy or self.knowledge_operation_busy:
+            return
         document = self._selected_document()
 
         if not document:
@@ -2834,14 +3016,8 @@ class MainWindow(QMainWindow):
         self._show_error(message)
 
     def _set_knowledge_busy(self, busy):
-        for button in (
-            self.import_button,
-            self.delete_button,
-            self.reindex_button,
-            self.refresh_button,
-            self.cloud_refresh_button,
-        ):
-            button.setDisabled(busy)
+        self.knowledge_operation_busy = bool(busy)
+        self._update_knowledge_operation_buttons()
 
     def change_persona(self, persona_id):
         if persona_id == self.active_persona["id"]:
